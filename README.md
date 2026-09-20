@@ -1,7 +1,7 @@
 # online-1
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
-move with the arrow keys through a randomly generated maze, racing for a collectible dot.
+move with the arrow keys through a randomly generated lava maze, racing for a collectible dot.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -42,6 +42,11 @@ That is not a bandwidth optimisation, it is a correctness requirement. `simulate
 collision against the grid while replaying buffered inputs, so if two peers disagreed about a
 single wall, every prediction after that point would be wrong and reconciliation would fight
 the player forever. Shipping a seed makes disagreement impossible by construction.
+
+Everything outside the navigable floor is drawn as lava: charred crust shading toward ember by
+per-cell heat, with a molten lip on every face that touches open ground and a slow per-cell
+shimmer. It is **decoration only** — those cells are walls, and `simulate()` treats them exactly
+as it did before. Touching lava costs you nothing but time.
 
 The maze regenerates whenever any score hits a multiple of 10. Players are repositioned into
 open cells as part of the same RPC — the new layout may well have dropped a wall where
@@ -183,7 +188,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 |---|---|
 | `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
 | `player.gd` / `player.tscn` | A 32×32 `ColorRect`, its interpolation, and the server's per-peer input queue |
-| `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and its own `_draw()` |
+| `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and the lava `_draw()` |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
 | `notes/` | The seven-stage write-up this was built from |
 

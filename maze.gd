@@ -81,6 +81,8 @@ static func is_blocked(centre: Vector2, half: float) -> bool:
 ## Centre of a random open cell. Server-side only — the result is sent explicitly,
 ## so it does not need to match anything a client would compute.
 static func random_open_point(rng: RandomNumberGenerator) -> Vector2:
+	if grid.is_empty():
+		return Vector2.ZERO           # no maze generated yet
 	var open: Array[Vector2i] = []
 	for y in ROWS:
 		for x in COLS:
@@ -93,12 +95,73 @@ static func random_open_point(rng: RandomNumberGenerator) -> Vector2:
 
 # --- drawing -----------------------------------------------------------------
 
+const FLOOR := Color(0.13, 0.13, 0.15, 1.0)    # cooled basalt you can walk on
+const CRUST := Color(0.11, 0.04, 0.04, 1.0)    # the dark skin on top of the lava
+const EMBER := Color(0.62, 0.13, 0.03, 1.0)    # what glows through the cracks
+const MOLTEN := Color(1.0, 0.52, 0.10, 1.0)    # the exposed edge facing open ground
+
+const SEAM := 3.0            # thickness of the molten rim, in pixels
+const PULSE_HZ := 0.22       # how fast a cell breathes
+
+func _ready() -> void:
+	# The shimmer needs a redraw per frame, which is pointless without a screen.
+	set_process(DisplayServer.get_name() != "headless")
+
+func _process(_delta: float) -> void:
+	queue_redraw()
+
+## Stable per-cell value in 0..1. Folded with the seed so a new maze gets a new
+## pattern rather than the same blotches in the same places.
+static func _hash01(x: int, y: int) -> float:
+	var n: int = (x * 73856093) ^ (y * 19349663) ^ (current_seed * 83492791)
+	return float(absi(n) % 1024) / 1024.0
+
+## How much of this wall cell is exposed to walkable ground, 0..1.
+static func _exposure(x: int, y: int) -> float:
+	var open := 0
+	for d: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+		var nx: int = x + d.x
+		var ny: int = y + d.y
+		if nx < 0 or ny < 0 or nx >= COLS or ny >= ROWS:
+			continue
+		if at(nx, ny) == 0:
+			open += 1
+	return float(open) / 4.0
+
 func _draw() -> void:
 	if grid.is_empty():
 		return
-	# Clearly darker than the default background, which is about #4d4d4d.
-	var wall := Color(0.13, 0.14, 0.19, 1.0)
+	var t := float(Time.get_ticks_msec()) / 1000.0
 	for y in ROWS:
 		for x in COLS:
-			if at(x, y) == 1:
-				draw_rect(Rect2(Vector2(x, y) * cell, cell), wall)
+			var rect := Rect2(Vector2(x, y) * cell, cell)
+			if at(x, y) == 0:
+				draw_rect(rect, FLOOR)
+				continue
+			var h := _hash01(x, y)
+			var exposure := _exposure(x, y)
+			# Each cell breathes on its own phase, so the field ripples instead
+			# of blinking in unison.
+			var pulse := 0.5 + 0.5 * sin(t * TAU * PULSE_HZ + h * TAU)
+			var heat := clampf(0.10 + 0.30 * h + 0.22 * pulse + 0.30 * exposure, 0.0, 1.0)
+			draw_rect(rect, CRUST.lerp(EMBER, heat))
+			_draw_seams(x, y, rect, pulse)
+
+## A bright molten lip on each face that touches walkable ground — the edge is
+## where lava actually reads as lava.
+func _draw_seams(x: int, y: int, rect: Rect2, pulse: float) -> void:
+	var glow := MOLTEN
+	glow.a = 0.55 + 0.45 * pulse
+	if _is_open(x, y - 1):
+		draw_rect(Rect2(rect.position, Vector2(cell.x, SEAM)), glow)
+	if _is_open(x, y + 1):
+		draw_rect(Rect2(rect.position + Vector2(0, cell.y - SEAM), Vector2(cell.x, SEAM)), glow)
+	if _is_open(x - 1, y):
+		draw_rect(Rect2(rect.position, Vector2(SEAM, cell.y)), glow)
+	if _is_open(x + 1, y):
+		draw_rect(Rect2(rect.position + Vector2(cell.x - SEAM, 0), Vector2(SEAM, cell.y)), glow)
+
+static func _is_open(x: int, y: int) -> bool:
+	if x < 0 or y < 0 or x >= COLS or y >= ROWS:
+		return false
+	return at(x, y) == 0
