@@ -91,6 +91,39 @@ So you hear your own pickups and never anyone else's, and a dedicated server nev
 allocates the players — `_setup_audio()` returns early when headless, which also spares a VPS
 from decoding an mp3 forever.
 
+### Keep every reliable RPC under the MTU
+
+This one cost an evening. `sync_world` originally sent the whole world to a joiner in one
+call — seed, scores, standings, icons, names, the full round history and a snapshot of all
+20 items. That is **3260 bytes**. ENet's MTU is 1400.
+
+On localhost it worked perfectly: ENet fragments the packet and every fragment arrives.
+Through a playit tunnel it did not. The tunnel's effective MTU is lower, MTU-sized fragments
+were dropped, the reliable packet could never complete — and because it was reliable and
+ordered, **it head-of-line blocked every RPC queued behind it**. The joiner got no maze, no
+players, no HUD: a blank screen. ENet then timed the peer out and the client printed
+"Server disconnected".
+
+The symptom is badly misleading. Nothing errors, nothing logs, and the one thing you would
+suspect — the tunnel — is working fine.
+
+The fix is structural, not a tweak: **bulk state is sent as many small messages, never one
+big one.** Round history is built incrementally by every peer via `record_round`, so it never
+travels in bulk; live items are replayed to a joiner with one `spawn_item` each. Worst case
+with 8 players, maximum-length names, a full item field and nine rounds played:
+
+| RPC | Bytes |
+|---|---|
+| `sync_world` | 696 |
+| `set_maze` | 336 |
+| `update_state` | 312 |
+| `record_round` | 160 |
+| `game_over` | 152 |
+| `spawn_item` | 44 |
+
+If you add a field to an RPC, measure it: `var_to_bytes([args]).size()`. Anything approaching
+1200 bytes needs splitting.
+
 ### Rounds
 
 A round ends when somebody reaches **25 points**; the game ends when somebody has won **10
@@ -274,7 +307,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The thirteen RPCs
+## The fourteen RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
@@ -285,7 +318,8 @@ same node sits at the same path on every peer. That is what makes RPC addressing
 | `sync_world` | `authority, reliable` | Late-join catch-up: seed, scores, standings, icons, live items. Sent *before* the spawns. |
 | `request_identity` | `any_peer, call_local, reliable` | A client asks for an emoji and a name; both are validated. |
 | `apply_identity` | `authority, call_local, reliable` | The server is the one that tells everybody. |
-| `game_over` | `authority, call_local, reliable` | Winner plus the full round history. |
+| `record_round` | `authority, call_local, reliable` | One finished round. Every peer keeps its own history. |
+| `game_over` | `authority, call_local, reliable` | Winner and standings. History is already local. |
 | `request_restart` | `any_peer, call_local, reliable` | Anyone at the results screen may deal a new game. |
 | `restart_game` | `authority, call_local, reliable` | Clears standings and history everywhere. |
 | `set_maze` | `authority, call_local, reliable` | A new seed plus everyone's safe position in the new layout. |

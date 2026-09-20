@@ -348,9 +348,19 @@ func _on_peer_connected(id: int) -> void:
 	print("[%d] peer_connected: %d" % [multiplayer.get_unique_id(), id])
 	if not multiplayer.is_server():
 		return
-	# 1. the shared world first, so the newcomer can collide before it can move
-	sync_world.rpc_id(id, maze_seed, scores, rounds_won, icons, names, round_history,
-		round_index, game_finished, _item_snapshot())
+	# 1. the shared world first, so the newcomer can collide before it can move.
+	#    Everything here is deliberately small: a reliable RPC bigger than the
+	#    path MTU stalls the whole channel behind it and eventually times the
+	#    peer out. Bulk state goes as many little messages, never one big one.
+	sync_world.rpc_id(id, maze_seed, scores, rounds_won, icons, names,
+		round_index, game_finished)
+	for entry in round_history:
+		record_round.rpc_id(id, int(entry["round"]), int(entry["winner"]), entry["scores"])
+	for iid in items:
+		var it: Collectible = items[iid]
+		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
+		# with everyone else's rather than restarting the clock.
+		spawn_item.rpc_id(id, iid, it.kind, it.position, maxf(it.lifetime - it.age, 0.5))
 	# 2. catch the newcomer up on everyone already here
 	for existing_id in players:
 		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
@@ -535,14 +545,20 @@ func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: D
 	pending.clear()   # predictions made against the old walls mean nothing now
 	print("[%d] maze regenerated, seed %d" % [multiplayer.get_unique_id(), seed_value])
 
+## One finished round. Sent as it happens, and replayed one-at-a-time to late
+## joiners, so the history is never shipped as a single oversized payload.
 @rpc("authority", "call_local", "reliable")
-func game_over(winner: int, history: Array, standings: Dictionary,
-		all_names: Dictionary, all_icons: Dictionary) -> void:
+func record_round(round_no: int, winner: int, final_scores: Dictionary) -> void:
+	for entry in round_history:
+		if int(entry["round"]) == round_no:
+			return                     # idempotent
+	round_history.append({"round": round_no, "winner": winner, "scores": final_scores})
+
+@rpc("authority", "call_local", "reliable")
+func game_over(winner: int, standings: Dictionary, round_no: int) -> void:
 	game_finished = true
-	round_history = history.duplicate(true)
 	rounds_won = standings.duplicate()
-	names = all_names.duplicate()
-	icons = all_icons.duplicate()
+	round_index = round_no
 	_show_game_over(winner)
 
 ## Anyone at the results screen may start the next game.
@@ -573,21 +589,16 @@ func restart_game() -> void:
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
 func sync_world(seed_value: int, all_scores: Dictionary, standings: Dictionary,
-		all_icons: Dictionary, all_names: Dictionary, history: Array, round_no: int,
-		finished: bool, snapshot: Array) -> void:
+		all_icons: Dictionary, all_names: Dictionary, round_no: int, finished: bool) -> void:
 	_apply_maze(seed_value)
 	scores = all_scores.duplicate()
 	rounds_won = standings.duplicate()
 	icons = all_icons.duplicate()
 	names = all_names.duplicate()
-	round_history = history.duplicate(true)
 	round_index = round_no
 	game_finished = finished
 	_clear_items()
-	for entry in snapshot:
-		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
-		# with everyone else's rather than restarting the clock.
-		spawn_item(int(entry["id"]), int(entry["kind"]), entry["pos"], float(entry["left"]))
+	round_history.clear()
 	_refresh_scores()
 
 # --- reconciliation ----------------------------------------------------------
@@ -655,12 +666,10 @@ func _apply_maze(seed_value: int) -> void:
 ## Server only: bank the round, then either end the game or deal a new maze.
 func _finish_round(winner: int) -> void:
 	rounds_won[winner] = int(rounds_won.get(winner, 0)) + 1
-	round_history.append({
-		"round": round_index, "winner": winner, "scores": scores.duplicate(),
-	})
+	record_round.rpc(round_index, winner, scores.duplicate())
 	round_index += 1
 	if int(rounds_won[winner]) >= GAME_WINS:
-		game_over.rpc(winner, round_history, rounds_won, names, icons)
+		game_over.rpc(winner, rounds_won, round_index)
 	else:
 		_new_maze(winner)
 
@@ -672,14 +681,6 @@ func _new_maze(winner: int = 0) -> void:
 	for id in players:
 		placements[id] = _open_spawn()
 	set_maze.rpc(seed_value, placements, winner, rounds_won, round_index)
-
-func _item_snapshot() -> Array:
-	var out := []
-	for iid in items:
-		var c: Collectible = items[iid]
-		out.append({"id": iid, "kind": c.kind, "pos": c.position,
-			"left": maxf(c.lifetime - c.age, 0.5)})
-	return out
 
 func _clear_items() -> void:
 	for iid in items.keys():
