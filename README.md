@@ -1,7 +1,8 @@
 # online-1
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
-move with the arrow keys through a randomly generated lava maze, racing for a collectible dot.
+move with the arrow keys through a randomly generated lava maze, racing to grab gold, rubies,
+emeralds and diamonds before they rot away.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -48,7 +49,27 @@ per-cell heat, with a molten lip on every face that touches open ground and a sl
 shimmer. It is **decoration only** — those cells are walls, and `simulate()` treats them exactly
 as it did before. Touching lava costs you nothing but time.
 
-The maze regenerates whenever any score hits a multiple of 10. Players are repositioned into
+### Collectibles
+
+Between 3 and 5 pickups lie in the maze at any time; the server re-rolls the target inside
+that range every time one leaves. Each is one of four kinds, drawn by weight so the valuable
+ones are rare:
+
+| Kind | Worth | Appears |
+|---|---|---|
+| Gold coin | 1 | 50% |
+| Ruby | 2 | 28% |
+| Emerald | 3 | 15% |
+| Diamond | 5 | 7% |
+
+Every item is born with a lifespan of 8–18 seconds. The server ages them and calls
+`remove_item` with `collector = 0` when one times out; clients blink the item out over its
+last three seconds, accelerating as it runs down, so "about to vanish" is legible without
+counting. `sync_world` sends a late joiner the time *remaining* rather than the full lifespan,
+so their countdown lines up with everyone else's.
+
+The maze regenerates whenever any score crosses a multiple of 10. Crossing, not landing on —
+a 5-point diamond taking you from 8 to 13 still counts, which `score % 10 == 0` would miss. Players are repositioned into
 open cells as part of the same RPC — the new layout may well have dropped a wall where
 somebody was standing — and clients drop their `pending` buffer, since predictions made
 against the old walls mean nothing.
@@ -189,20 +210,22 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
 | `player.gd` / `player.tscn` | A 32×32 `ColorRect`, its interpolation, and the server's per-peer input queue |
 | `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and the lava `_draw()` |
+| `collectible.gd` | One pickup: its kind, its lifespan countdown, and how it draws itself |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
 | `notes/` | The seven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The seven RPCs
+## The eight RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
 | `spawn_player` | `authority, call_local, reliable` | An *event*. Miss one and a player is invisible forever. |
 | `despawn_player` | `authority, call_local, reliable` | Same. |
-| `on_collected` | `authority, call_local, reliable` | Same — a missed score is permanently wrong. |
-| `sync_world` | `authority, reliable` | Late-join catch-up: maze seed, dot, scoreboard. Sent *before* the spawns. |
+| `spawn_item` | `authority, call_local, reliable` | An *event*. A missed spawn is an item nobody can see. |
+| `remove_item` | `authority, call_local, reliable` | Collection *and* expiry. A missed score is permanently wrong. |
+| `sync_world` | `authority, reliable` | Late-join catch-up: maze seed, scoreboard, live items. Sent *before* the spawns. |
 | `set_maze` | `authority, call_local, reliable` | A new seed plus everyone's safe position in the new layout. |
 | `submit_input` | `any_peer, call_local, unreliable_ordered` | Untrusted. Ordering stops a stale direction overwriting a fresh one. |
 | `update_state` | `authority, unreliable` | *State*. A dropped position is worthless 50 ms later — a newer one already arrived. |
@@ -229,6 +252,14 @@ corrected.
 - **`get_viewport_rect().size` returns 1152×1152 in headless mode**, not 1152×648. Hence
   `const ARENA` — a headless server using the viewport would let players walk off the bottom
   of every client's screen.
+- **`multiplayer_peer` is never `null`.** Godot 4.7 installs an `OfflineMultiplayerPeer` on
+  every scene tree, so before you host or join anything `multiplayer_peer != null`,
+  `is_server()` is `true` and `get_connection_status()` is `CONNECTION_CONNECTED`. The
+  stage-4 guard `if multiplayer.multiplayer_peer == null: return` therefore never guarded
+  anything — the server simulation had been running since startup. Harmless until a `while`
+  loop in the spawn code met an empty maze and span forever. Track the session yourself; this
+  project uses an explicit `in_session` flag. The notes' stage-4 gotcha ("is `_physics_process`
+  returning early because `multiplayer_peer` is `null`?") rests on a false premise.
 - **An RPC during the handshake is an error, not a no-op.** Between assigning
   `multiplayer_peer` and `connected_to_server` firing, `rpc_id` throws *"Trying to call an RPC
   via a multiplayer peer which is not connected"*. Harmless before stage 7, because input was

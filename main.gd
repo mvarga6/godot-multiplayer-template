@@ -6,8 +6,11 @@ const MAX_PLAYERS := 8
 const SPEED := 220.0
 const ARENA := Vector2(1152, 648)   # a game rule, not a window size
 const HALF := Vector2(16, 16)
-const PICKUP_RADIUS := 24.0
-const REGEN_SCORE := 10          # regenerate the maze each time someone hits a multiple of this
+const REGEN_SCORE := 10          # regenerate the maze each time someone crosses a multiple of this
+const MIN_ITEMS := 3             # how many collectibles are in the maze at once
+const MAX_ITEMS := 5
+const LIFETIME_MIN := 8.0        # seconds a collectible survives before it rots away
+const LIFETIME_MAX := 18.0
 const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run ahead
 const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow it forever
 const PLAYER_SCENE := preload("res://player.tscn")
@@ -16,6 +19,13 @@ var players: Dictionary = {}   # peer_id:int -> Player node
 var scores: Dictionary = {}    # peer_id:int -> int
 var is_dedicated := false
 var maze_seed := 0             # server: the seed every peer is currently generating from
+var items: Dictionary = {}     # item_id:int -> Collectible node
+var _next_item_id := 1         # server: hands out item ids
+var _desired_items := MIN_ITEMS
+## Godot hands every tree an OfflineMultiplayerPeer, so `multiplayer_peer != null`
+## and `is_server()` are both true before you have hosted or joined anything.
+## Track the session explicitly instead of trusting either of them.
+var in_session := false
 var port := DEFAULT_PORT       # overridden by `-- --port N`
 
 # Client-side prediction bookkeeping.
@@ -24,7 +34,7 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 
 @onready var players_root: Node2D = $Players
 @onready var maze: Maze = $Maze
-@onready var dot: Node2D = $Dot
+@onready var items_root: Node2D = $Collectibles
 @onready var broadcast_timer: Timer = $BroadcastTimer
 @onready var lobby: CanvasLayer = $Lobby
 @onready var ip_field: LineEdit = $Lobby/VBoxContainer/IpField
@@ -55,6 +65,7 @@ func _start_dedicated_server() -> void:
 		get_tree().quit(1)
 		return
 	multiplayer.multiplayer_peer = peer
+	in_session = true
 	_new_maze()
 	broadcast_timer.start()
 	print("Dedicated server listening on UDP %d" % port)
@@ -83,7 +94,7 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 	return out.clamp(HALF, ARENA - HALF)
 
 func _physics_process(delta: float) -> void:
-	if multiplayer.multiplayer_peer == null:
+	if not in_session:
 		return
 	if multiplayer.multiplayer_peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
 		return                      # still handshaking: an RPC now is an error, not a no-op
@@ -126,19 +137,72 @@ func _server_simulate(delta: float) -> void:
 			# Nothing arrived in time. Assume they are still holding the same
 			# key; if that guess is wrong, reconciliation fixes it.
 			p.position = simulate(p.position, p.input_dir, delta)
+	_expire_items(delta)
 	_check_pickup()
+	_top_up_items()
 
 func _check_pickup() -> void:
-	for id in players:
-		if players[id].position.distance_to(dot.position) > PICKUP_RADIUS:
-			continue
-		scores[id] = int(scores.get(id, 0)) + 1
-		if scores[id] % REGEN_SCORE == 0:
-			on_collected.rpc(id, scores[id], dot.position)   # score now; the new maze moves the dot
-			_new_maze()
-		else:
-			on_collected.rpc(id, scores[id], _open_spawn())
-		return   # one per tick; a tie is broken by iteration order, the same way for everyone
+	var reach := Collectible.RADIUS + HALF.x
+	for pid in players:
+		var ppos: Vector2 = players[pid].position
+		for iid in items.keys():
+			var item: Collectible = items[iid]
+			if ppos.distance_to(item.position) > reach:
+				continue
+			var before := int(scores.get(pid, 0))
+			var after := before + int(Collectible.VALUE[item.kind])
+			scores[pid] = after
+			remove_item.rpc(iid, pid, after)
+			# Integer division, so a 5-point diamond that jumps 8 -> 13 still
+			# counts as crossing 10. Comparing `after % 10 == 0` would miss it.
+			if after / REGEN_SCORE > before / REGEN_SCORE:
+				_new_maze()
+				return                     # the maze just replaced every item
+			break                          # this player has had their pickup this tick
+
+## Server only: retire anything that has outlived its lifespan.
+func _expire_items(delta: float) -> void:
+	for iid in items.keys():
+		var item: Collectible = items[iid]
+		item.age += delta                  # the server ages them too; it does not _process
+		if item.age >= item.lifetime:
+			remove_item.rpc(iid, 0, 0)     # peer 0 == nobody collected it
+
+## Server only: keep between MIN_ITEMS and MAX_ITEMS lying around.
+func _top_up_items() -> void:
+	# Bounded: a failed spawn must not turn this into a busy loop.
+	var budget := MAX_ITEMS
+	while items.size() < _desired_items and budget > 0:
+		budget -= 1
+		if not _spawn_item():
+			return
+
+func _spawn_item() -> bool:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var pos := _free_item_point(rng)
+	if pos == Vector2.ZERO:
+		return false                   # no maze yet, or nowhere free
+	var id := _next_item_id
+	_next_item_id += 1
+	spawn_item.rpc(id, Collectible.random_kind(rng), pos,
+		rng.randf_range(LIFETIME_MIN, LIFETIME_MAX))
+	return true
+
+## An open cell that no other collectible is already sitting in.
+func _free_item_point(rng: RandomNumberGenerator) -> Vector2:
+	for _attempt in 24:
+		var p := Maze.random_open_point(rng)
+		if p == Vector2.ZERO:
+			return Vector2.ZERO
+		var clear := true
+		for iid in items:
+			if items[iid].position.distance_to(p) < Collectible.RADIUS * 3.0:
+				clear = false
+				break
+		if clear:
+			return p
+	return Maze.random_open_point(rng)
 
 func _on_broadcast_timer_timeout() -> void:
 	if not multiplayer.is_server() or players.is_empty():
@@ -159,6 +223,7 @@ func _on_host_button_pressed() -> void:
 		_set_status("Cannot host: %s" % error_string(err))
 		return
 	multiplayer.multiplayer_peer = peer
+	in_session = true
 	lobby.hide()
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
@@ -189,7 +254,7 @@ func _on_peer_connected(id: int) -> void:
 	if not multiplayer.is_server():
 		return
 	# 1. the shared world first, so the newcomer can collide before it can move
-	sync_world.rpc_id(id, maze_seed, dot.position, scores)
+	sync_world.rpc_id(id, maze_seed, scores, _item_snapshot())
 	# 2. catch the newcomer up on everyone already here
 	for existing_id in players:
 		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
@@ -203,6 +268,7 @@ func _on_peer_disconnected(id: int) -> void:
 	despawn_player.rpc(id)
 
 func _on_connected_to_server() -> void:
+	in_session = true
 	lobby.hide()
 	_set_status("Connected, I am peer %d" % multiplayer.get_unique_id())
 
@@ -279,18 +345,39 @@ func update_state(state: Dictionary, acks: Dictionary) -> void:
 			p.target_position = state[id]    # _process eases toward it
 
 @rpc("authority", "call_local", "reliable")
-func on_collected(peer_id: int, new_score: int, new_dot_pos: Vector2) -> void:
-	scores[peer_id] = new_score
-	dot.position = new_dot_pos
+func spawn_item(id: int, kind: int, pos: Vector2, lifetime: float) -> void:
+	if items.has(id):
+		return
+	var c := Collectible.new()
+	c.name = "item_%d" % id
+	c.setup(kind, lifetime)
+	c.position = pos
+	items_root.add_child(c)
+	items[id] = c
+
+## `collector` is 0 when the item simply timed out.
+@rpc("authority", "call_local", "reliable")
+func remove_item(id: int, collector: int, new_score: int) -> void:
+	if not items.has(id):
+		return
+	var c: Collectible = items[id]
+	items.erase(id)
+	c.queue_free()
+	_desired_items = randi_range(MIN_ITEMS, MAX_ITEMS)
+	if collector == 0:
+		return
+	scores[collector] = new_score
 	_refresh_scores()
-	print("[%d] %d collected, now on %d" % [multiplayer.get_unique_id(), peer_id, new_score])
+	print("[%d] %d picked up %s, now on %d" % [
+		multiplayer.get_unique_id(), collector,
+		Collectible.Kind.keys()[c.kind], new_score])
 
 ## Everyone regenerates the identical grid from `seed_value`; only the seed travels.
 ## Players are repositioned because the new layout may have dropped a wall on them.
 @rpc("authority", "call_local", "reliable")
-func set_maze(seed_value: int, dot_pos: Vector2, placements: Dictionary) -> void:
+func set_maze(seed_value: int, placements: Dictionary) -> void:
 	_apply_maze(seed_value)
-	dot.position = dot_pos
+	_clear_items()
 	for id in placements:
 		if not players.has(id):
 			continue
@@ -303,10 +390,14 @@ func set_maze(seed_value: int, dot_pos: Vector2, placements: Dictionary) -> void
 
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
-func sync_world(seed_value: int, dot_pos: Vector2, all_scores: Dictionary) -> void:
+func sync_world(seed_value: int, all_scores: Dictionary, snapshot: Array) -> void:
 	_apply_maze(seed_value)
-	dot.position = dot_pos
 	scores = all_scores.duplicate()
+	_clear_items()
+	for entry in snapshot:
+		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
+		# with everyone else's rather than restarting the clock.
+		spawn_item(int(entry["id"]), int(entry["kind"]), entry["pos"], float(entry["left"]))
 	_refresh_scores()
 
 # --- reconciliation ----------------------------------------------------------
@@ -371,14 +462,27 @@ func _apply_maze(seed_value: int) -> void:
 	Maze.generate(seed_value, ARENA)
 	maze.queue_redraw()
 
-## Server only: pick a new layout, then place the dot and every player in it.
+## Server only: pick a new layout and place every player safely inside it.
 func _new_maze() -> void:
 	var seed_value := randi()
 	_apply_maze(seed_value)                  # generate first, so _open_spawn() has a grid
 	var placements := {}
 	for id in players:
 		placements[id] = _open_spawn()
-	set_maze.rpc(seed_value, _open_spawn(), placements)
+	set_maze.rpc(seed_value, placements)
+
+func _item_snapshot() -> Array:
+	var out := []
+	for iid in items:
+		var c: Collectible = items[iid]
+		out.append({"id": iid, "kind": c.kind, "pos": c.position,
+			"left": maxf(c.lifetime - c.age, 0.5)})
+	return out
+
+func _clear_items() -> void:
+	for iid in items.keys():
+		items[iid].queue_free()
+	items.clear()
 
 func _open_spawn() -> Vector2:
 	var rng := RandomNumberGenerator.new()
@@ -397,8 +501,10 @@ func _refresh_scores() -> void:
 	score_label.text = "   ".join(parts)
 
 func _clear_world() -> void:
+	in_session = false
 	input_tick = 0
 	pending.clear()
+	_clear_items()
 	for id in players.keys():
 		players[id].queue_free()
 	players.clear()

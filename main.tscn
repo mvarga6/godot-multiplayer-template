@@ -9,16 +9,9 @@ script = ExtResource("1_main")
 [node name="Maze" type="Node2D" parent="."]
 script = ExtResource("2_maze")
 
+[node name="Collectibles" type="Node2D" parent="."]
+
 [node name="Players" type="Node2D" parent="." unique_id=1654191028]
-
-[node name="Dot" type="Node2D" parent="."]
-
-[node name="ColorRect" type="ColorRect" parent="Dot"]
-offset_left = -8.0
-offset_top = -8.0
-offset_right = 8.0
-offset_bottom = 8.0
-color = Color(1, 0.84, 0.25, 1)
 
 [node name="BroadcastTimer" type="Timer" parent="."]
 wait_time = 0.05
@@ -38,7 +31,7 @@ text = "Host"
 
 [node name="IpField" type="LineEdit" parent="Lobby/VBoxContainer" unique_id=1401486000]
 layout_mode = 2
-text = "127.0.0.1"
+text = "della-affiliates.tun.ply.gg:30755"
 
 [node name="JoinButton" type="Button" parent="Lobby/VBoxContainer" unique_id=2057356870]
 layout_mode = 2
