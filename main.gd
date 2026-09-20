@@ -1,3 +1,4 @@
+# MAIN ENTRYPOINT OF GAME
 extends Node2D
 
 const DEFAULT_PORT := 9000
