@@ -1,9 +1,13 @@
 [gd_scene format=3 uid="uid://cqdf1yprlm4ju"]
 
+[ext_resource type="Script" path="res://maze.gd" id="2_maze"]
 [ext_resource type="Script" uid="uid://d2espvwu27hmv" path="res://main.gd" id="1_main"]
 
 [node name="Main" type="Node2D" unique_id=1686026068]
 script = ExtResource("1_main")
+
+[node name="Maze" type="Node2D" parent="."]
+script = ExtResource("2_maze")
 
 [node name="Players" type="Node2D" parent="." unique_id=1654191028]
 

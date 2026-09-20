@@ -1,7 +1,7 @@
 # online-1
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
-move with the arrow keys, one per connected player.
+move with the arrow keys through a randomly generated maze, racing for a collectible dot.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -30,8 +30,23 @@ Three techniques hide the latency that costs you, and none of them remove it:
 | **Reconciliation** | being wrong | your movement code must be a pure function |
 
 `simulate(pos, dir, delta)` in `main.gd` is that pure function. It reads nothing outside its
-arguments — no `Input`, no node state, no randomness — which is the only reason the client can
-replay it and land where the server did.
+arguments except the maze grid — no `Input`, no node state, no randomness — which is the only
+reason the client can replay it and land where the server did.
+
+### Why the maze ships as a seed
+
+`set_maze` sends an `int`, never a layout. Every peer runs the same depth-first carve over the
+same `RandomNumberGenerator` seed and gets a byte-identical grid.
+
+That is not a bandwidth optimisation, it is a correctness requirement. `simulate()` tests
+collision against the grid while replaying buffered inputs, so if two peers disagreed about a
+single wall, every prediction after that point would be wrong and reconciliation would fight
+the player forever. Shipping a seed makes disagreement impossible by construction.
+
+The maze regenerates whenever any score hits a multiple of 10. Players are repositioned into
+open cells as part of the same RPC — the new layout may well have dropped a wall where
+somebody was standing — and clients drop their `pending` buffer, since predictions made
+against the old walls mean nothing.
 
 ## Running it
 
@@ -168,20 +183,22 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 |---|---|
 | `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
 | `player.gd` / `player.tscn` | A 32×32 `ColorRect`, its interpolation, and the server's per-peer input queue |
+| `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and its own `_draw()` |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
 | `notes/` | The seven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The six RPCs
+## The seven RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
 | `spawn_player` | `authority, call_local, reliable` | An *event*. Miss one and a player is invisible forever. |
 | `despawn_player` | `authority, call_local, reliable` | Same. |
 | `on_collected` | `authority, call_local, reliable` | Same — a missed score is permanently wrong. |
-| `sync_world` | `authority, reliable` | Late-join catch-up for the dot and the scoreboard. |
+| `sync_world` | `authority, reliable` | Late-join catch-up: maze seed, dot, scoreboard. Sent *before* the spawns. |
+| `set_maze` | `authority, call_local, reliable` | A new seed plus everyone's safe position in the new layout. |
 | `submit_input` | `any_peer, call_local, unreliable_ordered` | Untrusted. Ordering stops a stale direction overwriting a fresh one. |
 | `update_state` | `authority, unreliable` | *State*. A dropped position is worthless 50 ms later — a newer one already arrived. |
 

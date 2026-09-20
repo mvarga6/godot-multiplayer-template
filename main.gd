@@ -7,6 +7,7 @@ const SPEED := 220.0
 const ARENA := Vector2(1152, 648)   # a game rule, not a window size
 const HALF := Vector2(16, 16)
 const PICKUP_RADIUS := 24.0
+const REGEN_SCORE := 10          # regenerate the maze each time someone hits a multiple of this
 const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run ahead
 const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow it forever
 const PLAYER_SCENE := preload("res://player.tscn")
@@ -14,6 +15,7 @@ const PLAYER_SCENE := preload("res://player.tscn")
 var players: Dictionary = {}   # peer_id:int -> Player node
 var scores: Dictionary = {}    # peer_id:int -> int
 var is_dedicated := false
+var maze_seed := 0             # server: the seed every peer is currently generating from
 var port := DEFAULT_PORT       # overridden by `-- --port N`
 
 # Client-side prediction bookkeeping.
@@ -21,6 +23,7 @@ var input_tick := 0            # monotonically increasing sequence number
 var pending: Array = []        # inputs sent but not yet acknowledged by the server
 
 @onready var players_root: Node2D = $Players
+@onready var maze: Maze = $Maze
 @onready var dot: Node2D = $Dot
 @onready var broadcast_timer: Timer = $BroadcastTimer
 @onready var lobby: CanvasLayer = $Lobby
@@ -52,7 +55,7 @@ func _start_dedicated_server() -> void:
 		get_tree().quit(1)
 		return
 	multiplayer.multiplayer_peer = peer
-	dot.position = _random_spawn()
+	_new_maze()
 	broadcast_timer.start()
 	print("Dedicated server listening on UDP %d" % port)
 
@@ -64,8 +67,20 @@ func _start_dedicated_server() -> void:
 ## outside its arguments — no `Input`, no node state, no randomness. That purity
 ## is the whole reason client and server can agree on where a square ended up.
 static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
-	var moved := pos + dir.limit_length(1.0) * SPEED * delta
-	return moved.clamp(HALF, ARENA - HALF)
+	var step := dir.limit_length(1.0) * SPEED * delta
+	var out := pos
+	# If we somehow start inside a wall, let every move through rather than
+	# blocking all four directions and trapping the player there forever.
+	var stuck := Maze.is_blocked(pos, HALF.x)
+	# Resolve each axis separately, so running into a wall diagonally slides
+	# along it instead of stopping dead. Both peers do this identically.
+	var try_x := Vector2(out.x + step.x, out.y)
+	if stuck or not Maze.is_blocked(try_x, HALF.x):
+		out = try_x
+	var try_y := Vector2(out.x, out.y + step.y)
+	if stuck or not Maze.is_blocked(try_y, HALF.y):
+		out = try_y
+	return out.clamp(HALF, ARENA - HALF)
 
 func _physics_process(delta: float) -> void:
 	if multiplayer.multiplayer_peer == null:
@@ -118,7 +133,11 @@ func _check_pickup() -> void:
 		if players[id].position.distance_to(dot.position) > PICKUP_RADIUS:
 			continue
 		scores[id] = int(scores.get(id, 0)) + 1
-		on_collected.rpc(id, scores[id], _random_spawn())
+		if scores[id] % REGEN_SCORE == 0:
+			on_collected.rpc(id, scores[id], dot.position)   # score now; the new maze moves the dot
+			_new_maze()
+		else:
+			on_collected.rpc(id, scores[id], _open_spawn())
 		return   # one per tick; a tie is broken by iteration order, the same way for everyone
 
 func _on_broadcast_timer_timeout() -> void:
@@ -142,9 +161,9 @@ func _on_host_button_pressed() -> void:
 	multiplayer.multiplayer_peer = peer
 	lobby.hide()
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
-	dot.position = _random_spawn()
+	_new_maze()
 	broadcast_timer.start()
-	spawn_player.rpc(1, _random_spawn())   # "call_local" means this also runs here
+	spawn_player.rpc(1, _open_spawn())     # "call_local" means this also runs here
 
 func _on_join_button_pressed() -> void:
 	# A tunnel (playit.gg) hands out an arbitrary public port, so the field
@@ -169,13 +188,13 @@ func _on_peer_connected(id: int) -> void:
 	print("[%d] peer_connected: %d" % [multiplayer.get_unique_id(), id])
 	if not multiplayer.is_server():
 		return
-	# 1. catch the newcomer up on everyone already here
+	# 1. the shared world first, so the newcomer can collide before it can move
+	sync_world.rpc_id(id, maze_seed, dot.position, scores)
+	# 2. catch the newcomer up on everyone already here
 	for existing_id in players:
 		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
-	# 2. tell everyone (including this server) about the newcomer
-	spawn_player.rpc(id, _random_spawn())
-	# 3. and on the shared world, which the spawn RPCs say nothing about
-	sync_world.rpc_id(id, dot.position, scores)
+	# 3. tell everyone (including this server) about the newcomer
+	spawn_player.rpc(id, _open_spawn())
 
 func _on_peer_disconnected(id: int) -> void:
 	print("[%d] peer_disconnected: %d" % [multiplayer.get_unique_id(), id])
@@ -266,9 +285,26 @@ func on_collected(peer_id: int, new_score: int, new_dot_pos: Vector2) -> void:
 	_refresh_scores()
 	print("[%d] %d collected, now on %d" % [multiplayer.get_unique_id(), peer_id, new_score])
 
+## Everyone regenerates the identical grid from `seed_value`; only the seed travels.
+## Players are repositioned because the new layout may have dropped a wall on them.
+@rpc("authority", "call_local", "reliable")
+func set_maze(seed_value: int, dot_pos: Vector2, placements: Dictionary) -> void:
+	_apply_maze(seed_value)
+	dot.position = dot_pos
+	for id in placements:
+		if not players.has(id):
+			continue
+		var p: Node2D = players[id]
+		p.position = placements[id]
+		p.target_position = placements[id]
+		p.input_queue.clear()
+	pending.clear()   # predictions made against the old walls mean nothing now
+	print("[%d] maze regenerated, seed %d" % [multiplayer.get_unique_id(), seed_value])
+
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
-func sync_world(dot_pos: Vector2, all_scores: Dictionary) -> void:
+func sync_world(seed_value: int, dot_pos: Vector2, all_scores: Dictionary) -> void:
+	_apply_maze(seed_value)
 	dot.position = dot_pos
 	scores = all_scores.duplicate()
 	_refresh_scores()
@@ -330,8 +366,24 @@ func _split_address(text: String) -> Array:
 
 # --- helpers -----------------------------------------------------------------
 
-func _random_spawn() -> Vector2:
-	return Vector2(randf_range(100, ARENA.x - 100), randf_range(100, ARENA.y - 100))
+func _apply_maze(seed_value: int) -> void:
+	maze_seed = seed_value
+	Maze.generate(seed_value, ARENA)
+	maze.queue_redraw()
+
+## Server only: pick a new layout, then place the dot and every player in it.
+func _new_maze() -> void:
+	var seed_value := randi()
+	_apply_maze(seed_value)                  # generate first, so _open_spawn() has a grid
+	var placements := {}
+	for id in players:
+		placements[id] = _open_spawn()
+	set_maze.rpc(seed_value, _open_spawn(), placements)
+
+func _open_spawn() -> Vector2:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	return Maze.random_open_point(rng)
 
 func _refresh_scores() -> void:
 	if is_dedicated:
