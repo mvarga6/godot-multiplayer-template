@@ -1,0 +1,56 @@
+[gd_scene format=3 uid="uid://cqdf1yprlm4ju"]
+
+[ext_resource type="Script" uid="uid://d2espvwu27hmv" path="res://main.gd" id="1_main"]
+
+[node name="Main" type="Node2D" unique_id=1686026068]
+script = ExtResource("1_main")
+
+[node name="Players" type="Node2D" parent="." unique_id=1654191028]
+
+[node name="Dot" type="Node2D" parent="."]
+
+[node name="ColorRect" type="ColorRect" parent="Dot"]
+offset_left = -8.0
+offset_top = -8.0
+offset_right = 8.0
+offset_bottom = 8.0
+color = Color(1, 0.84, 0.25, 1)
+
+[node name="BroadcastTimer" type="Timer" parent="."]
+wait_time = 0.05
+
+[node name="Lobby" type="CanvasLayer" parent="." unique_id=934350765]
+
+[node name="VBoxContainer" type="VBoxContainer" parent="Lobby" unique_id=1277453307]
+offset_left = 40.0
+offset_top = 40.0
+offset_right = 320.0
+offset_bottom = 200.0
+theme_override_constants/separation = 8
+
+[node name="HostButton" type="Button" parent="Lobby/VBoxContainer" unique_id=1594279802]
+layout_mode = 2
+text = "Host"
+
+[node name="IpField" type="LineEdit" parent="Lobby/VBoxContainer" unique_id=1401486000]
+layout_mode = 2
+text = "127.0.0.1"
+
+[node name="JoinButton" type="Button" parent="Lobby/VBoxContainer" unique_id=2057356870]
+layout_mode = 2
+text = "Join"
+
+[node name="StatusLabel" type="Label" parent="Lobby/VBoxContainer" unique_id=2111118603]
+layout_mode = 2
+
+[node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="ScoreLabel" type="Label" parent="Hud"]
+offset_left = 16.0
+offset_top = 8.0
+offset_right = 600.0
+offset_bottom = 34.0
+
+[connection signal="pressed" from="Lobby/VBoxContainer/HostButton" to="." method="_on_host_button_pressed"]
+[connection signal="pressed" from="Lobby/VBoxContainer/JoinButton" to="." method="_on_join_button_pressed"]
+[connection signal="timeout" from="BroadcastTimer" to="." method="_on_broadcast_timer_timeout"]
