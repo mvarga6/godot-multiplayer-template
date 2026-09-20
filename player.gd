@@ -14,23 +14,28 @@ var last_tick: int = 0                  # newest input consumed, echoed back to 
 var target_position: Vector2 = Vector2.ZERO
 var is_local_authority := false         # true: we set position ourselves, do not interpolate
 
-var _icon := "?"                        # may be set before the Label exists
+var _icon := "?"                        # may be set before the Labels exist
+var _display := ""
 
 @onready var icon_label: Label = $Icon
+@onready var name_label: Label = $NameTag
 
 func setup(id: int) -> void:
 	peer_id = id
 	name = str(id)
 
-func set_icon(glyph: String) -> void:
+func set_identity(glyph: String, display: String) -> void:
 	_icon = glyph
+	_display = display
 	if is_node_ready():
 		icon_label.text = _icon
+		name_label.text = _display
 
 func _ready() -> void:
-	# Deterministic colour per peer: golden-ratio hue stepping keeps
-	# consecutive ids visually far apart. It is now the border rather than the
-	# whole square, so two players who pick the same emoji stay distinguishable.
+	# Deterministic colour per peer: golden-ratio hue stepping keeps consecutive
+	# ids visually far apart. Nothing is drawn for the body — just the glyph and
+	# the name tag — so this tints the tag, which is what still tells two players
+	# with the same emoji apart.
 	tint = Color.from_hsv(fposmod(peer_id * 0.618034, 1.0), 0.65, 0.95)
 	icon_label.text = _icon
 	# Godot's bundled font has no emoji glyphs, so ask the OS for one.
@@ -41,7 +46,11 @@ func _ready() -> void:
 	])
 	icon_label.add_theme_font_override("font", f)
 	icon_label.add_theme_font_size_override("font_size", 22)
-	queue_redraw()
+	name_label.text = _display
+	name_label.add_theme_font_size_override("font_size", 11)
+	name_label.add_theme_color_override("font_color", tint)
+	name_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	name_label.add_theme_constant_override("outline_size", 4)
 
 func _process(delta: float) -> void:
 	if is_local_authority:
@@ -53,8 +62,3 @@ func _process(delta: float) -> void:
 	# lerp(a, b, 0.2) converges at different speeds at 30 and 144 fps, which is
 	# the same class of bug as forgetting `delta` entirely.
 	position = position.lerp(target_position, 1.0 - pow(0.001, delta))
-
-func _draw() -> void:
-	var box := Rect2(-HALF, -HALF, HALF * 2.0, HALF * 2.0)
-	draw_rect(box, Color(0.0, 0.0, 0.0, 0.45))   # keeps the glyph legible over lava
-	draw_rect(box, tint, false, 2.0)             # who you are

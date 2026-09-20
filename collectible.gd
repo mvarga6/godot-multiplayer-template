@@ -21,6 +21,14 @@ const WEIGHT := {
 	Kind.DIAMOND: 7,
 }
 
+## One short cue per kind. Only the peer who actually grabbed it hears this.
+const SOUND := {
+	Kind.GOLD: preload("res://audio/pickup_gold.wav"),
+	Kind.RUBY: preload("res://audio/pickup_ruby.wav"),
+	Kind.EMERALD: preload("res://audio/pickup_emerald.wav"),
+	Kind.DIAMOND: preload("res://audio/pickup_diamond.wav"),
+}
+
 const RADIUS := 11.0
 const FADE_AT := 3.0        # seconds left when it starts blinking out
 

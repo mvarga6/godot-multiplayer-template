@@ -7,10 +7,12 @@ const SPEED := 220.0
 const ARENA := Vector2(2304, 1296)  # a game rule, not a window size
 const HALF := Vector2(16, 16)
 const WIN_SCORE := 25            # points that win the round; the maze then regenerates
-const ANNOUNCE_SECONDS := 4.0
+const ANNOUNCE_SECONDS := 3.0
+const GAME_WINS := 10            # rounds won that take the whole game
+const NAME_MAX := 16
 const ICONS: Array[String] = ["🐱", "🐶", "🦊", "🐸", "🐵", "🐙", "🦄", "🐝", "🦖", "🐧"]
-const MIN_ITEMS := 3             # how many collectibles are in the maze at once
-const MAX_ITEMS := 5
+const MIN_ITEMS := 14            # how many collectibles are in the maze at once
+const MAX_ITEMS := 20            # the arena is 4x what it was, so the count scaled with it
 const LIFETIME_MIN := 8.0        # seconds a collectible survives before it rots away
 const LIFETIME_MAX := 18.0
 const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run ahead
@@ -21,6 +23,10 @@ var players: Dictionary = {}   # peer_id:int -> Player node
 var scores: Dictionary = {}    # peer_id:int -> points this round
 var rounds_won: Dictionary = {}  # peer_id:int -> rounds won
 var icons: Dictionary = {}     # peer_id:int -> index into ICONS
+var names: Dictionary = {}     # peer_id:int -> display name
+var round_history: Array = []  # one {round, winner, scores} per finished round
+var round_index := 1
+var game_finished := false
 var is_dedicated := false
 var maze_seed := 0             # server: the seed every peer is currently generating from
 var items: Dictionary = {}     # item_id:int -> Collectible node
@@ -45,11 +51,23 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 @onready var ip_field: LineEdit = $Lobby/VBoxContainer/IpField
 @onready var status: Label = $Lobby/VBoxContainer/StatusLabel
 @onready var score_label: Label = $Hud/ScoreLabel
+@onready var hud: CanvasLayer = $Hud
 @onready var announce_label: Label = $Hud/AnnounceLabel
+@onready var round_overlay: CanvasLayer = $RoundOverlay
+@onready var round_overlay_root: Control = $RoundOverlay/Root
+@onready var round_overlay_text: Label = $RoundOverlay/Root/Text
+@onready var game_over_layer: CanvasLayer = $GameOver
+@onready var game_over_title: Label = $GameOver/Root/Box/Title
+@onready var game_over_stats: GridContainer = $GameOver/Root/Box/Stats
+@onready var name_field: LineEdit = $Lobby/VBoxContainer/NameField
+@onready var music: AudioStreamPlayer = $Music
 @onready var camera: Camera2D = $Camera2D
 @onready var icon_picker: OptionButton = $Lobby/VBoxContainer/IconPicker
 
+var _sfx: Dictionary = {}      # Collectible.Kind -> AudioStreamPlayer
+
 func _ready() -> void:
+	_setup_audio()
 	_setup_camera()
 	_setup_icon_picker()
 	announce_label.text = ""
@@ -104,6 +122,27 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 		out = try_y
 	return out.clamp(HALF, ARENA - HALF)
 
+func _setup_audio() -> void:
+	if is_dedicated or DisplayServer.get_name() == "headless":
+		return                     # a VPS has no speakers and no reason to decode an mp3
+	if music.stream is AudioStreamMP3:
+		music.stream.loop = true
+	music.play()
+	# One player per kind, so two different pickups in quick succession do not
+	# cut each other off.
+	for kind in Collectible.SOUND:
+		var p := AudioStreamPlayer.new()
+		p.stream = Collectible.SOUND[kind]
+		p.bus = "Master"
+		p.volume_db = -4.0
+		add_child(p)
+		_sfx[kind] = p
+
+## Deliberately local-only: you hear your own pickups, never anyone else's.
+func _play_pickup(kind: int) -> void:
+	if _sfx.has(kind):
+		_sfx[kind].play()
+
 func _setup_camera() -> void:
 	# The arena is four viewports big now, so the view follows you.
 	camera.limit_left = 0
@@ -129,6 +168,11 @@ func _setup_icon_picker() -> void:
 	icon_picker.add_theme_font_size_override("font_size", 22)
 	score_label.add_theme_font_override("font", _emoji_font(true))
 	announce_label.add_theme_font_override("font", _emoji_font(true))
+	round_overlay_text.add_theme_font_override("font", _emoji_font(true))
+	round_overlay_text.add_theme_font_size_override("font_size", 44)
+	game_over_title.add_theme_font_override("font", _emoji_font(true))
+	game_over_title.add_theme_font_size_override("font_size", 34)
+
 	for i in ICONS.size():
 		icon_picker.add_item(ICONS[i], i)
 	icon_picker.selected = randi() % ICONS.size()
@@ -148,6 +192,8 @@ func _physics_process(delta: float) -> void:
 		return
 	if multiplayer.multiplayer_peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
 		return                      # still handshaking: an RPC now is an error, not a no-op
+	if game_finished:
+		return                      # nobody moves while the results are up
 	if multiplayer.is_server():
 		_server_simulate(delta)
 	if not is_dedicated:
@@ -204,8 +250,7 @@ func _check_pickup() -> void:
 			remove_item.rpc(iid, pid, after)
 			# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
 			if after >= WIN_SCORE:
-				rounds_won[pid] = int(rounds_won.get(pid, 0)) + 1
-				_new_maze(pid)
+				_finish_round(pid)
 				return                     # the new round replaced every item
 			break                          # this player has had their pickup this tick
 
@@ -274,7 +319,7 @@ func _on_host_button_pressed() -> void:
 	multiplayer.multiplayer_peer = peer
 	in_session = true
 	lobby.hide()
-	request_icon.rpc_id(1, icon_picker.selected)
+	request_identity.rpc_id(1, icon_picker.selected, name_field.text)
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
 	broadcast_timer.start()
@@ -304,7 +349,8 @@ func _on_peer_connected(id: int) -> void:
 	if not multiplayer.is_server():
 		return
 	# 1. the shared world first, so the newcomer can collide before it can move
-	sync_world.rpc_id(id, maze_seed, scores, rounds_won, icons, _item_snapshot())
+	sync_world.rpc_id(id, maze_seed, scores, rounds_won, icons, names, round_history,
+		round_index, game_finished, _item_snapshot())
 	# 2. catch the newcomer up on everyone already here
 	for existing_id in players:
 		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
@@ -320,7 +366,7 @@ func _on_peer_disconnected(id: int) -> void:
 func _on_connected_to_server() -> void:
 	in_session = true
 	lobby.hide()
-	request_icon.rpc_id(1, icon_picker.selected)
+	request_identity.rpc_id(1, icon_picker.selected, name_field.text)
 	_set_status("Connected, I am peer %d" % multiplayer.get_unique_id())
 
 func _on_connection_failed() -> void:
@@ -353,7 +399,7 @@ func spawn_player(id: int, pos: Vector2) -> void:
 		scores[id] = 0
 	if not rounds_won.has(id):
 		rounds_won[id] = 0
-	p.set_icon(ICONS[int(icons.get(id, 0))])
+	p.set_identity(ICONS[int(icons.get(id, 0))], str(names.get(id, "Player %d" % id)))
 	_refresh_scores()
 	print("[%d] spawned %d at %s" % [multiplayer.get_unique_id(), id, pos])
 
@@ -366,6 +412,7 @@ func despawn_player(id: int) -> void:
 	scores.erase(id)
 	rounds_won.erase(id)
 	icons.erase(id)
+	names.erase(id)
 	_refresh_scores()
 	print("[%d] despawned %d" % [multiplayer.get_unique_id(), id])
 
@@ -421,46 +468,62 @@ func remove_item(id: int, collector: int, new_score: int) -> void:
 	c.queue_free()
 	_desired_items = randi_range(MIN_ITEMS, MAX_ITEMS)
 	if collector == 0:
-		return
+		return                     # timed out; nobody grabbed it, nobody hears it
+	if collector == multiplayer.get_unique_id() and not is_dedicated:
+		_play_pickup(c.kind)
 	scores[collector] = new_score
 	_refresh_scores()
 	print("[%d] %d picked up %s, now on %d" % [
 		multiplayer.get_unique_id(), collector,
 		Collectible.Kind.keys()[c.kind], new_score])
 
-## Clients ask for an icon; the server is the one that tells everybody.
+## Clients ask for an icon and a name; the server is the one that tells everybody.
 @rpc("any_peer", "call_local", "reliable")
-func request_icon(index: int) -> void:
+func request_identity(index: int, wanted: String) -> void:
 	if not multiplayer.is_server():
 		return
 	var id := multiplayer.get_remote_sender_id()
 	if id == 0:
 		id = 1                                  # host called it on itself
 	if index < 0 or index >= ICONS.size():
-		return                                  # never trust an any_peer argument
-	icons[id] = index
-	apply_icon.rpc(id, index)
+		index = 0                               # never trust an any_peer argument
+	apply_identity.rpc(id, index, _clean_name(wanted, id))
 
 @rpc("authority", "call_local", "reliable")
-func apply_icon(id: int, index: int) -> void:
+func apply_identity(id: int, index: int, display: String) -> void:
 	if index < 0 or index >= ICONS.size():
 		return
 	icons[id] = index
+	names[id] = display
 	if players.has(id):
-		players[id].set_icon(ICONS[index])
+		players[id].set_identity(ICONS[index], display)
 	_refresh_scores()
+
+## `any_peer` input: strip control characters, cap the length, never allow empty.
+func _clean_name(raw: String, id: int) -> String:
+	var out := ""
+	for ch in raw.strip_edges():
+		if ch.unicode_at(0) >= 32 and ch.unicode_at(0) != 127:
+			out += ch
+		if out.length() >= NAME_MAX:
+			break
+	out = out.strip_edges()
+	return out if out != "" else "Player %d" % id
 
 ## Everyone regenerates the identical grid from `seed_value`; only the seed travels.
 ## Players are repositioned because the new layout may have dropped a wall on them.
 @rpc("authority", "call_local", "reliable")
-func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: Dictionary) -> void:
+func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: Dictionary,
+		round_no: int) -> void:
 	_apply_maze(seed_value)
 	_clear_items()
 	rounds_won = standings.duplicate()
+	round_index = round_no
 	for id in scores:
 		scores[id] = 0                 # a new maze is a new round
 	if winner != 0:
-		_announce("%s wins the round!  (%d total)" % [_label_for(winner), int(rounds_won.get(winner, 0))])
+		_show_round_overlay("%s wins round %d\n%d of %d" % [
+			_label_for(winner), round_no - 1, int(rounds_won.get(winner, 0)), GAME_WINS])
 	_refresh_scores()
 	for id in placements:
 		if not players.has(id):
@@ -472,14 +535,54 @@ func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: D
 	pending.clear()   # predictions made against the old walls mean nothing now
 	print("[%d] maze regenerated, seed %d" % [multiplayer.get_unique_id(), seed_value])
 
+@rpc("authority", "call_local", "reliable")
+func game_over(winner: int, history: Array, standings: Dictionary,
+		all_names: Dictionary, all_icons: Dictionary) -> void:
+	game_finished = true
+	round_history = history.duplicate(true)
+	rounds_won = standings.duplicate()
+	names = all_names.duplicate()
+	icons = all_icons.duplicate()
+	_show_game_over(winner)
+
+## Anyone at the results screen may start the next game.
+@rpc("any_peer", "call_local", "reliable")
+func request_restart() -> void:
+	if not multiplayer.is_server() or not game_finished:
+		return
+	for id in rounds_won:
+		rounds_won[id] = 0
+	for id in scores:
+		scores[id] = 0
+	round_history.clear()
+	round_index = 1
+	restart_game.rpc()
+	_new_maze(0)
+
+@rpc("authority", "call_local", "reliable")
+func restart_game() -> void:
+	game_finished = false
+	round_history.clear()
+	round_index = 1
+	for id in rounds_won:
+		rounds_won[id] = 0
+	game_over_layer.visible = false
+	hud.visible = true
+	_refresh_scores()
+
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
 func sync_world(seed_value: int, all_scores: Dictionary, standings: Dictionary,
-		all_icons: Dictionary, snapshot: Array) -> void:
+		all_icons: Dictionary, all_names: Dictionary, history: Array, round_no: int,
+		finished: bool, snapshot: Array) -> void:
 	_apply_maze(seed_value)
 	scores = all_scores.duplicate()
 	rounds_won = standings.duplicate()
 	icons = all_icons.duplicate()
+	names = all_names.duplicate()
+	round_history = history.duplicate(true)
+	round_index = round_no
+	game_finished = finished
 	_clear_items()
 	for entry in snapshot:
 		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
@@ -549,6 +652,18 @@ func _apply_maze(seed_value: int) -> void:
 	Maze.generate(seed_value, ARENA)
 	maze.queue_redraw()
 
+## Server only: bank the round, then either end the game or deal a new maze.
+func _finish_round(winner: int) -> void:
+	rounds_won[winner] = int(rounds_won.get(winner, 0)) + 1
+	round_history.append({
+		"round": round_index, "winner": winner, "scores": scores.duplicate(),
+	})
+	round_index += 1
+	if int(rounds_won[winner]) >= GAME_WINS:
+		game_over.rpc(winner, round_history, rounds_won, names, icons)
+	else:
+		_new_maze(winner)
+
 ## Server only: start a round. `winner` is 0 for the very first one.
 func _new_maze(winner: int = 0) -> void:
 	var seed_value := randi()
@@ -556,7 +671,7 @@ func _new_maze(winner: int = 0) -> void:
 	var placements := {}
 	for id in players:
 		placements[id] = _open_spawn()
-	set_maze.rpc(seed_value, placements, winner, rounds_won)
+	set_maze.rpc(seed_value, placements, winner, rounds_won, round_index)
 
 func _item_snapshot() -> Array:
 	var out := []
@@ -578,8 +693,7 @@ func _open_spawn() -> Vector2:
 
 func _label_for(id: int) -> String:
 	var glyph: String = ICONS[int(icons.get(id, 0))]
-	var me := multiplayer.get_unique_id() if in_session else 0
-	return "%s %s" % [glyph, "you" if id == me else str(id)]
+	return "%s %s" % [glyph, str(names.get(id, "Player %d" % id))]
 
 func _refresh_scores() -> void:
 	if is_dedicated:
@@ -591,6 +705,69 @@ func _refresh_scores() -> void:
 		parts.append("%s %d/%d  wins %d" % [
 			_label_for(id), int(scores[id]), WIN_SCORE, int(rounds_won.get(id, 0))])
 	score_label.text = "    ".join(parts)
+
+## ~1 second total: pop in, hold, fade out.
+func _show_round_overlay(text: String) -> void:
+	_announce(text.replace("\n", "  "))
+	if is_dedicated:
+		return
+	round_overlay_text.text = text
+	round_overlay_root.pivot_offset = get_viewport_rect().size * 0.5
+	round_overlay_root.modulate.a = 0.0
+	round_overlay_root.scale = Vector2(0.82, 0.82)
+	round_overlay.visible = true
+	var tw := create_tween()
+	tw.tween_property(round_overlay_root, "modulate:a", 1.0, 0.15)
+	tw.parallel().tween_property(round_overlay_root, "scale", Vector2.ONE, 0.18) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_interval(0.52)
+	tw.tween_property(round_overlay_root, "modulate:a", 0.0, 0.3)
+	tw.tween_callback(func() -> void: round_overlay.visible = false)
+
+func _show_game_over(winner: int) -> void:
+	print("GAME OVER: %s takes it %d-%d" % [
+		_label_for(winner), int(rounds_won.get(winner, 0)), GAME_WINS])
+	if is_dedicated:
+		return
+	round_overlay.visible = false
+	game_over_title.text = "%s wins the game" % _label_for(winner)
+	_fill_stats_grid()
+	hud.visible = false               # the results page is the whole screen now
+	game_over_layer.visible = true
+
+## Rounds down the rows, players across the columns. A GridContainer rather than
+## a padded string, because the font is proportional and `%-18s` does not line up.
+func _fill_stats_grid() -> void:
+	for child in game_over_stats.get_children():
+		child.queue_free()
+	var ids: Array = rounds_won.keys()
+	ids.sort()
+	game_over_stats.columns = ids.size() + 1
+	_grid_cell("round", true)
+	for id in ids:
+		_grid_cell(_label_for(id), true)
+	for entry in round_history:
+		_grid_cell(str(int(entry["round"])), false)
+		var round_scores: Dictionary = entry["scores"]
+		for id in ids:
+			var won: bool = int(entry["winner"]) == id
+			_grid_cell("%d%s" % [int(round_scores.get(id, 0)), "  ★" if won else ""], won)
+	_grid_cell("rounds won", true)
+	for id in ids:
+		_grid_cell(str(int(rounds_won.get(id, 0))), true)
+
+func _grid_cell(text: String, strong: bool) -> void:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_override("font", _emoji_font(true))
+	l.add_theme_font_size_override("font_size", 17)
+	l.add_theme_color_override("font_color",
+		Color(1, 0.86, 0.45) if strong else Color(0.78, 0.78, 0.82))
+	l.custom_minimum_size.x = 120.0
+	game_over_stats.add_child(l)
+
+func _on_play_again_pressed() -> void:
+	request_restart.rpc_id(1)
 
 func _announce(msg: String) -> void:
 	print(msg)
@@ -606,6 +783,13 @@ func _clear_world() -> void:
 	_clear_items()
 	rounds_won.clear()
 	icons.clear()
+	names.clear()
+	round_history.clear()
+	round_index = 1
+	game_finished = false
+	game_over_layer.visible = false
+	round_overlay.visible = false
+	hud.visible = true
 	for id in players.keys():
 		players[id].queue_free()
 	players.clear()

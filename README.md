@@ -2,7 +2,8 @@
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
 move with the arrow keys through a randomly generated lava maze, racing to grab gold, rubies,
-emeralds and diamonds before they rot away. First to 25 wins the round.
+emeralds and diamonds before they rot away. First to 25 wins the round, first to 10 rounds
+wins the game.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -51,8 +52,9 @@ as it did before. Touching lava costs you nothing but time.
 
 ### Collectibles
 
-Between 3 and 5 pickups lie in the maze at any time; the server re-rolls the target inside
-that range every time one leaves. Each is one of four kinds, drawn by weight so the valuable
+Between 14 and 20 pickups lie in the maze at any time; the server re-rolls the target inside
+that range every time one leaves. The count is tuned to the arena: at 4× the old floor area,
+3–5 items meant wandering for a minute without seeing one. Each is one of four kinds, drawn by weight so the valuable
 ones are rare:
 
 | Kind | Worth | Appears |
@@ -68,15 +70,45 @@ last three seconds, accelerating as it runs down, so "about to vanish" is legibl
 counting. `sync_world` sends a late joiner the time *remaining* rather than the full lifespan,
 so their countdown lines up with everyone else's.
 
+### Sound
+
+`audio/background.mp3` loops under everything at -14 dB, started in `_setup_audio()`.
+
+Each pickup kind has its own short cue — a flat two-note clink for gold, a warmer resolving
+third for a ruby, a rising major arpeggio for an emerald, a four-note sparkle with a
+shimmering tail for a diamond. They are generated WAVs, not samples; `tools/make_sounds.py`
+regenerates them.
+
+The cue is **deliberately local**. `remove_item` runs on every peer, but only the one whose
+`get_unique_id()` matches the collector plays anything:
+
+```gdscript
+if collector == multiplayer.get_unique_id() and not is_dedicated:
+    _play_pickup(c.kind)
+```
+
+So you hear your own pickups and never anyone else's, and a dedicated server never even
+allocates the players — `_setup_audio()` returns early when headless, which also spares a VPS
+from decoding an mp3 forever.
+
 ### Rounds
 
-A round ends when somebody reaches **25 points**. `set_maze` then carves a new layout, resets
+A round ends when somebody reaches **25 points**; the game ends when somebody has won **10
+rounds**. `set_maze` then carves a new layout, resets
 every score to zero, and increments that player's win count — one RPC, so no peer can see a
 half-applied round. The test is `>=`, not `==`: a 5-point diamond can jump you from 22 straight
 past 25.
 
-Per-round scores are transient; `rounds_won` persists until you disconnect. Both ride along in
-`sync_world`, so a late joiner sees the standings immediately.
+Per-round scores are transient; `rounds_won` and `round_history` persist until the game ends.
+All of it rides along in `sync_world`, so a late joiner sees the standings immediately — even
+one who arrives while the results page is up.
+
+A round win pops a one-second overlay (scale-in with a back ease, hold, fade) driven by a
+`Tween`. The tenth win opens the results page instead: every round's scores as a
+`GridContainer`, a ★ on each round's winner, the totals, and a **Play again** button. The
+button sends `request_restart` to the server, which is the only peer allowed to actually deal
+a new game. `game_finished` freezes `_physics_process` on every peer while it is up, so nobody
+drifts around behind the results.
 
 ### The arena and the camera
 
@@ -84,13 +116,16 @@ The arena is 2304×1296 — four viewports — carved into a 39×23 grid, so 19�
 That is too big to see at once, so a `Camera2D` follows your own square with smoothing, limited
 to the arena bounds. The lobby and HUD are `CanvasLayer`s and stay put.
 
-### Icons
+### Names and icons
 
-Pick an emoji in the lobby before hosting or joining. The client sends the *index* with
-`request_icon`; the server range-checks it and broadcasts `apply_icon`, because a client
-handing out its own identity to everyone else is exactly the pattern stage 4 warned about.
-The hitbox is still a 32×32 square whatever glyph you choose, and the peer colour survives as
-the border — two players who pick the same animal are still distinguishable. Players are repositioned into
+Pick an emoji and type a name in the lobby before hosting or joining. The client sends both
+with `request_identity`; the server range-checks the index, strips control characters from the
+name, caps it at 16 characters and substitutes `Player <id>` if it is empty — then broadcasts
+`apply_identity`. A client handing out its own identity directly to other clients is exactly
+the pattern stage 4 warned about, so it does not.
+Nothing is drawn for the body — just the glyph and a name tag under it. The hitbox is still a
+32×32 square whatever emoji you choose, it simply is not visible. The peer colour tints the
+name tag, which is what tells two players who picked the same animal apart. Players are repositioned into
 open cells as part of the same RPC — the new layout may well have dropped a wall where
 somebody was standing — and clients drop their `pending` buffer, since predictions made
 against the old walls mean nothing.
@@ -229,16 +264,17 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | File | What it is |
 |---|---|
 | `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
-| `player.gd` / `player.tscn` | A 32×32 `ColorRect`, its interpolation, and the server's per-peer input queue |
+| `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and the lava `_draw()` |
-| `collectible.gd` | One pickup: its kind, its lifespan countdown, and how it draws itself |
+| `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
+| `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
 | `notes/` | The seven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The ten RPCs
+## The thirteen RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
@@ -247,8 +283,11 @@ same node sits at the same path on every peer. That is what makes RPC addressing
 | `spawn_item` | `authority, call_local, reliable` | An *event*. A missed spawn is an item nobody can see. |
 | `remove_item` | `authority, call_local, reliable` | Collection *and* expiry. A missed score is permanently wrong. |
 | `sync_world` | `authority, reliable` | Late-join catch-up: seed, scores, standings, icons, live items. Sent *before* the spawns. |
-| `request_icon` | `any_peer, call_local, reliable` | A client asks for an emoji; the index is range-checked. |
-| `apply_icon` | `authority, call_local, reliable` | The server is the one that tells everybody. |
+| `request_identity` | `any_peer, call_local, reliable` | A client asks for an emoji and a name; both are validated. |
+| `apply_identity` | `authority, call_local, reliable` | The server is the one that tells everybody. |
+| `game_over` | `authority, call_local, reliable` | Winner plus the full round history. |
+| `request_restart` | `any_peer, call_local, reliable` | Anyone at the results screen may deal a new game. |
+| `restart_game` | `authority, call_local, reliable` | Clears standings and history everywhere. |
 | `set_maze` | `authority, call_local, reliable` | A new seed plus everyone's safe position in the new layout. |
 | `submit_input` | `any_peer, call_local, unreliable_ordered` | Untrusted. Ordering stops a stale direction overwriting a fresh one. |
 | `update_state` | `authority, unreliable` | *State*. A dropped position is worthless 50 ms later — a newer one already arrived. |
@@ -285,6 +324,9 @@ corrected.
   returning early because `multiplayer_peer` is `null`?") rests on a false premise.
 - **GDScript's `\U` escape takes six hex digits, not eight.** `"\U0001F98A"` silently parses as
   U+0001F9 followed by a literal `8A`, so 🦊 renders as `ǹ8A`. Paste the emoji literally.
+- **`%-18s` does not align anything in a proportional font.** The results table looked like a
+  drunk spreadsheet until it became a `GridContainer` with one `Label` per cell. Pad strings
+  only under a monospace face.
 - **Font order decides whose metrics win.** A `SystemFont` listing "Noto Color Emoji" first
   gives *Latin* text the emoji face's fixed advance width, and the HUD comes out as
   `1 7 / 2 5`. Text face first, emoji as fallback, for anything containing words; emoji first
