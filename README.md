@@ -2,7 +2,7 @@
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
 move with the arrow keys through a randomly generated lava maze, racing to grab gold, rubies,
-emeralds and diamonds before they rot away.
+emeralds and diamonds before they rot away. First to 25 wins the round.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -68,8 +68,29 @@ last three seconds, accelerating as it runs down, so "about to vanish" is legibl
 counting. `sync_world` sends a late joiner the time *remaining* rather than the full lifespan,
 so their countdown lines up with everyone else's.
 
-The maze regenerates whenever any score crosses a multiple of 10. Crossing, not landing on —
-a 5-point diamond taking you from 8 to 13 still counts, which `score % 10 == 0` would miss. Players are repositioned into
+### Rounds
+
+A round ends when somebody reaches **25 points**. `set_maze` then carves a new layout, resets
+every score to zero, and increments that player's win count — one RPC, so no peer can see a
+half-applied round. The test is `>=`, not `==`: a 5-point diamond can jump you from 22 straight
+past 25.
+
+Per-round scores are transient; `rounds_won` persists until you disconnect. Both ride along in
+`sync_world`, so a late joiner sees the standings immediately.
+
+### The arena and the camera
+
+The arena is 2304×1296 — four viewports — carved into a 39×23 grid, so 19×11 = 209 maze cells.
+That is too big to see at once, so a `Camera2D` follows your own square with smoothing, limited
+to the arena bounds. The lobby and HUD are `CanvasLayer`s and stay put.
+
+### Icons
+
+Pick an emoji in the lobby before hosting or joining. The client sends the *index* with
+`request_icon`; the server range-checks it and broadcasts `apply_icon`, because a client
+handing out its own identity to everyone else is exactly the pattern stage 4 warned about.
+The hitbox is still a 32×32 square whatever glyph you choose, and the peer colour survives as
+the border — two players who pick the same animal are still distinguishable. Players are repositioned into
 open cells as part of the same RPC — the new layout may well have dropped a wall where
 somebody was standing — and clients drop their `pending` buffer, since predictions made
 against the old walls mean nothing.
@@ -217,7 +238,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The eight RPCs
+## The ten RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
@@ -225,7 +246,9 @@ same node sits at the same path on every peer. That is what makes RPC addressing
 | `despawn_player` | `authority, call_local, reliable` | Same. |
 | `spawn_item` | `authority, call_local, reliable` | An *event*. A missed spawn is an item nobody can see. |
 | `remove_item` | `authority, call_local, reliable` | Collection *and* expiry. A missed score is permanently wrong. |
-| `sync_world` | `authority, reliable` | Late-join catch-up: maze seed, scoreboard, live items. Sent *before* the spawns. |
+| `sync_world` | `authority, reliable` | Late-join catch-up: seed, scores, standings, icons, live items. Sent *before* the spawns. |
+| `request_icon` | `any_peer, call_local, reliable` | A client asks for an emoji; the index is range-checked. |
+| `apply_icon` | `authority, call_local, reliable` | The server is the one that tells everybody. |
 | `set_maze` | `authority, call_local, reliable` | A new seed plus everyone's safe position in the new layout. |
 | `submit_input` | `any_peer, call_local, unreliable_ordered` | Untrusted. Ordering stops a stale direction overwriting a fresh one. |
 | `update_state` | `authority, unreliable` | *State*. A dropped position is worthless 50 ms later — a newer one already arrived. |
@@ -260,6 +283,12 @@ corrected.
   loop in the spawn code met an empty maze and span forever. Track the session yourself; this
   project uses an explicit `in_session` flag. The notes' stage-4 gotcha ("is `_physics_process`
   returning early because `multiplayer_peer` is `null`?") rests on a false premise.
+- **GDScript's `\U` escape takes six hex digits, not eight.** `"\U0001F98A"` silently parses as
+  U+0001F9 followed by a literal `8A`, so 🦊 renders as `ǹ8A`. Paste the emoji literally.
+- **Font order decides whose metrics win.** A `SystemFont` listing "Noto Color Emoji" first
+  gives *Latin* text the emoji face's fixed advance width, and the HUD comes out as
+  `1 7 / 2 5`. Text face first, emoji as fallback, for anything containing words; emoji first
+  only for labels holding a single glyph.
 - **An RPC during the handshake is an error, not a no-op.** Between assigning
   `multiplayer_peer` and `connected_to_server` firing, `rpc_id` throws *"Trying to call an RPC
   via a multiplayer peer which is not connected"*. Harmless before stage 7, because input was

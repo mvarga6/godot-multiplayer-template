@@ -8,9 +8,9 @@ extends Node2D
 ## peers disagreed about one wall, every prediction would be wrong forever. Replicating
 ## a seed instead of a layout makes disagreement impossible by construction.
 
-const COLS := 19      # odd, so the border and the carved cells line up
-const ROWS := 11
-const EXTRA_OPENINGS := 6    # a perfect maze is mean for a chase; punch some loops in it
+const COLS := 39      # odd, so the border and the carved cells line up
+const ROWS := 23
+const EXTRA_OPENINGS := 22   # a perfect maze is mean for a chase; punch some loops in it
 
 static var grid := PackedByteArray()   # COLS*ROWS, 1 = wall, 0 = open
 static var current_seed := 0

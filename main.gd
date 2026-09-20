@@ -4,9 +4,11 @@ extends Node2D
 const DEFAULT_PORT := 9000
 const MAX_PLAYERS := 8
 const SPEED := 220.0
-const ARENA := Vector2(1152, 648)   # a game rule, not a window size
+const ARENA := Vector2(2304, 1296)  # a game rule, not a window size
 const HALF := Vector2(16, 16)
-const REGEN_SCORE := 10          # regenerate the maze each time someone crosses a multiple of this
+const WIN_SCORE := 25            # points that win the round; the maze then regenerates
+const ANNOUNCE_SECONDS := 4.0
+const ICONS: Array[String] = ["🐱", "🐶", "🦊", "🐸", "🐵", "🐙", "🦄", "🐝", "🦖", "🐧"]
 const MIN_ITEMS := 3             # how many collectibles are in the maze at once
 const MAX_ITEMS := 5
 const LIFETIME_MIN := 8.0        # seconds a collectible survives before it rots away
@@ -16,7 +18,9 @@ const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow
 const PLAYER_SCENE := preload("res://player.tscn")
 
 var players: Dictionary = {}   # peer_id:int -> Player node
-var scores: Dictionary = {}    # peer_id:int -> int
+var scores: Dictionary = {}    # peer_id:int -> points this round
+var rounds_won: Dictionary = {}  # peer_id:int -> rounds won
+var icons: Dictionary = {}     # peer_id:int -> index into ICONS
 var is_dedicated := false
 var maze_seed := 0             # server: the seed every peer is currently generating from
 var items: Dictionary = {}     # item_id:int -> Collectible node
@@ -26,6 +30,7 @@ var _desired_items := MIN_ITEMS
 ## and `is_server()` are both true before you have hosted or joined anything.
 ## Track the session explicitly instead of trusting either of them.
 var in_session := false
+var _announce_until := 0.0
 var port := DEFAULT_PORT       # overridden by `-- --port N`
 
 # Client-side prediction bookkeeping.
@@ -40,8 +45,14 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 @onready var ip_field: LineEdit = $Lobby/VBoxContainer/IpField
 @onready var status: Label = $Lobby/VBoxContainer/StatusLabel
 @onready var score_label: Label = $Hud/ScoreLabel
+@onready var announce_label: Label = $Hud/AnnounceLabel
+@onready var camera: Camera2D = $Camera2D
+@onready var icon_picker: OptionButton = $Lobby/VBoxContainer/IconPicker
 
 func _ready() -> void:
+	_setup_camera()
+	_setup_icon_picker()
+	announce_label.text = ""
 	_connect_multiplayer_signals()
 	var args := OS.get_cmdline_user_args()
 	port = _port_from_args(args)
@@ -92,6 +103,45 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 	if stuck or not Maze.is_blocked(try_y, HALF.y):
 		out = try_y
 	return out.clamp(HALF, ARENA - HALF)
+
+func _setup_camera() -> void:
+	# The arena is four viewports big now, so the view follows you.
+	camera.limit_left = 0
+	camera.limit_top = 0
+	camera.limit_right = int(ARENA.x)
+	camera.limit_bottom = int(ARENA.y)
+	camera.position_smoothing_enabled = true
+	camera.position_smoothing_speed = 8.0
+	camera.position = ARENA * 0.5
+
+## Two fonts, because order decides whose metrics win. Emoji-first makes Latin
+## text inherit the emoji font's fixed advance width and come out spaced like
+## "1 7 / 2 5", so anything with words in it needs the text face first.
+func _emoji_font(text_first: bool) -> SystemFont:
+	var f := SystemFont.new()
+	var emoji := ["Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Noto Emoji"]
+	var names: Array = (["sans-serif"] + emoji) if text_first else (emoji + ["sans-serif"])
+	f.font_names = PackedStringArray(names)
+	return f
+
+func _setup_icon_picker() -> void:
+	icon_picker.add_theme_font_override("font", _emoji_font(false))
+	icon_picker.add_theme_font_size_override("font_size", 22)
+	score_label.add_theme_font_override("font", _emoji_font(true))
+	announce_label.add_theme_font_override("font", _emoji_font(true))
+	for i in ICONS.size():
+		icon_picker.add_item(ICONS[i], i)
+	icon_picker.selected = randi() % ICONS.size()
+
+func _process(_delta: float) -> void:
+	if is_dedicated:
+		return
+	if in_session:
+		var me := multiplayer.get_unique_id()
+		if players.has(me):
+			camera.position = players[me].position
+	if announce_label.text != "" and Time.get_unix_time_from_system() > _announce_until:
+		announce_label.text = ""
 
 func _physics_process(delta: float) -> void:
 	if not in_session:
@@ -149,15 +199,14 @@ func _check_pickup() -> void:
 			var item: Collectible = items[iid]
 			if ppos.distance_to(item.position) > reach:
 				continue
-			var before := int(scores.get(pid, 0))
-			var after := before + int(Collectible.VALUE[item.kind])
+			var after := int(scores.get(pid, 0)) + int(Collectible.VALUE[item.kind])
 			scores[pid] = after
 			remove_item.rpc(iid, pid, after)
-			# Integer division, so a 5-point diamond that jumps 8 -> 13 still
-			# counts as crossing 10. Comparing `after % 10 == 0` would miss it.
-			if after / REGEN_SCORE > before / REGEN_SCORE:
-				_new_maze()
-				return                     # the maze just replaced every item
+			# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
+			if after >= WIN_SCORE:
+				rounds_won[pid] = int(rounds_won.get(pid, 0)) + 1
+				_new_maze(pid)
+				return                     # the new round replaced every item
 			break                          # this player has had their pickup this tick
 
 ## Server only: retire anything that has outlived its lifespan.
@@ -225,6 +274,7 @@ func _on_host_button_pressed() -> void:
 	multiplayer.multiplayer_peer = peer
 	in_session = true
 	lobby.hide()
+	request_icon.rpc_id(1, icon_picker.selected)
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
 	broadcast_timer.start()
@@ -254,7 +304,7 @@ func _on_peer_connected(id: int) -> void:
 	if not multiplayer.is_server():
 		return
 	# 1. the shared world first, so the newcomer can collide before it can move
-	sync_world.rpc_id(id, maze_seed, scores, _item_snapshot())
+	sync_world.rpc_id(id, maze_seed, scores, rounds_won, icons, _item_snapshot())
 	# 2. catch the newcomer up on everyone already here
 	for existing_id in players:
 		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
@@ -270,6 +320,7 @@ func _on_peer_disconnected(id: int) -> void:
 func _on_connected_to_server() -> void:
 	in_session = true
 	lobby.hide()
+	request_icon.rpc_id(1, icon_picker.selected)
 	_set_status("Connected, I am peer %d" % multiplayer.get_unique_id())
 
 func _on_connection_failed() -> void:
@@ -300,6 +351,9 @@ func spawn_player(id: int, pos: Vector2) -> void:
 	players[id] = p
 	if not scores.has(id):
 		scores[id] = 0
+	if not rounds_won.has(id):
+		rounds_won[id] = 0
+	p.set_icon(ICONS[int(icons.get(id, 0))])
 	_refresh_scores()
 	print("[%d] spawned %d at %s" % [multiplayer.get_unique_id(), id, pos])
 
@@ -310,6 +364,8 @@ func despawn_player(id: int) -> void:
 	players[id].queue_free()
 	players.erase(id)
 	scores.erase(id)
+	rounds_won.erase(id)
+	icons.erase(id)
 	_refresh_scores()
 	print("[%d] despawned %d" % [multiplayer.get_unique_id(), id])
 
@@ -372,12 +428,40 @@ func remove_item(id: int, collector: int, new_score: int) -> void:
 		multiplayer.get_unique_id(), collector,
 		Collectible.Kind.keys()[c.kind], new_score])
 
+## Clients ask for an icon; the server is the one that tells everybody.
+@rpc("any_peer", "call_local", "reliable")
+func request_icon(index: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var id := multiplayer.get_remote_sender_id()
+	if id == 0:
+		id = 1                                  # host called it on itself
+	if index < 0 or index >= ICONS.size():
+		return                                  # never trust an any_peer argument
+	icons[id] = index
+	apply_icon.rpc(id, index)
+
+@rpc("authority", "call_local", "reliable")
+func apply_icon(id: int, index: int) -> void:
+	if index < 0 or index >= ICONS.size():
+		return
+	icons[id] = index
+	if players.has(id):
+		players[id].set_icon(ICONS[index])
+	_refresh_scores()
+
 ## Everyone regenerates the identical grid from `seed_value`; only the seed travels.
 ## Players are repositioned because the new layout may have dropped a wall on them.
 @rpc("authority", "call_local", "reliable")
-func set_maze(seed_value: int, placements: Dictionary) -> void:
+func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: Dictionary) -> void:
 	_apply_maze(seed_value)
 	_clear_items()
+	rounds_won = standings.duplicate()
+	for id in scores:
+		scores[id] = 0                 # a new maze is a new round
+	if winner != 0:
+		_announce("%s wins the round!  (%d total)" % [_label_for(winner), int(rounds_won.get(winner, 0))])
+	_refresh_scores()
 	for id in placements:
 		if not players.has(id):
 			continue
@@ -390,9 +474,12 @@ func set_maze(seed_value: int, placements: Dictionary) -> void:
 
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
-func sync_world(seed_value: int, all_scores: Dictionary, snapshot: Array) -> void:
+func sync_world(seed_value: int, all_scores: Dictionary, standings: Dictionary,
+		all_icons: Dictionary, snapshot: Array) -> void:
 	_apply_maze(seed_value)
 	scores = all_scores.duplicate()
+	rounds_won = standings.duplicate()
+	icons = all_icons.duplicate()
 	_clear_items()
 	for entry in snapshot:
 		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
@@ -462,14 +549,14 @@ func _apply_maze(seed_value: int) -> void:
 	Maze.generate(seed_value, ARENA)
 	maze.queue_redraw()
 
-## Server only: pick a new layout and place every player safely inside it.
-func _new_maze() -> void:
+## Server only: start a round. `winner` is 0 for the very first one.
+func _new_maze(winner: int = 0) -> void:
 	var seed_value := randi()
 	_apply_maze(seed_value)                  # generate first, so _open_spawn() has a grid
 	var placements := {}
 	for id in players:
 		placements[id] = _open_spawn()
-	set_maze.rpc(seed_value, placements)
+	set_maze.rpc(seed_value, placements, winner, rounds_won)
 
 func _item_snapshot() -> Array:
 	var out := []
@@ -489,22 +576,36 @@ func _open_spawn() -> Vector2:
 	rng.randomize()
 	return Maze.random_open_point(rng)
 
+func _label_for(id: int) -> String:
+	var glyph: String = ICONS[int(icons.get(id, 0))]
+	var me := multiplayer.get_unique_id() if in_session else 0
+	return "%s %s" % [glyph, "you" if id == me else str(id)]
+
 func _refresh_scores() -> void:
 	if is_dedicated:
 		return
-	var me := multiplayer.get_unique_id() if multiplayer.multiplayer_peer != null else 0
 	var ids: Array = scores.keys()
 	ids.sort()
 	var parts := PackedStringArray()
 	for id in ids:
-		parts.append("%s %d" % ["you" if id == me else str(id), scores[id]])
-	score_label.text = "   ".join(parts)
+		parts.append("%s %d/%d  wins %d" % [
+			_label_for(id), int(scores[id]), WIN_SCORE, int(rounds_won.get(id, 0))])
+	score_label.text = "    ".join(parts)
+
+func _announce(msg: String) -> void:
+	print(msg)
+	if is_dedicated:
+		return
+	announce_label.text = msg
+	_announce_until = Time.get_unix_time_from_system() + ANNOUNCE_SECONDS
 
 func _clear_world() -> void:
 	in_session = false
 	input_tick = 0
 	pending.clear()
 	_clear_items()
+	rounds_won.clear()
+	icons.clear()
 	for id in players.keys():
 		players[id].queue_free()
 	players.clear()
