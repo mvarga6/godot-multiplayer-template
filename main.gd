@@ -10,6 +10,11 @@ const WIN_SCORE := 25            # points that win the round; the maze then rege
 const ANNOUNCE_SECONDS := 3.0
 const GAME_WINS := 10            # rounds won that take the whole game
 const NAME_MAX := 16
+## Bump this whenever the RPC surface changes. A client built against a
+## different number is refused with a clear message instead of failing weirdly
+## half an hour later.
+const PROTOCOL_VERSION := 1
+const AUTH_TIMEOUT := 5.0
 const ICONS: Array[String] = ["🐱", "🐶", "🦊", "🐸", "🐵", "🐙", "🦄", "🐝", "🦖", "🐧"]
 const MIN_ITEMS := 14            # how many collectibles are in the maze at once
 const MAX_ITEMS := 20            # the arena is 4x what it was, so the count scaled with it
@@ -28,6 +33,7 @@ var names: Dictionary = {}     # peer_id:int -> display name
 var round_history: Array = []  # one {round, winner, scores} per finished round
 var round_index := 1
 var game_finished := false
+var _pending_identity: Dictionary = {}   # server: peer_id -> {icon, name}, captured during auth
 var is_dedicated := false
 var maze_seed := 0             # server: the seed every peer is currently generating from
 var items: Dictionary = {}     # item_id:int -> Collectible node
@@ -69,6 +75,11 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 var _sfx: Dictionary = {}      # Collectible.Kind -> AudioStreamPlayer
 
 func _ready() -> void:
+	# Say goodbye properly instead of vanishing: ENet takes ~10s to notice a
+	# peer that simply stopped answering, but nothing at all to notice one that
+	# announced it was leaving.
+	get_tree().auto_accept_quit = false
+	_setup_auth()
 	_setup_spawners()
 	_setup_audio()
 	_setup_camera()
@@ -80,6 +91,94 @@ func _ready() -> void:
 	is_dedicated = "--server" in args or OS.has_feature("dedicated_server")
 	if is_dedicated:
 		_start_dedicated_server()
+
+## Nothing may join until it has proved it speaks the same protocol. Doing this
+## through `auth_callback` rather than a hello RPC matters: `peer_connected`
+## does not fire until auth completes, so a rejected client never reaches the
+## point of having a square in the world, and an accepted one arrives with its
+## name and icon already known.
+func _setup_auth() -> void:
+	multiplayer.auth_callback = _on_auth_received
+	multiplayer.auth_timeout = AUTH_TIMEOUT
+	multiplayer.peer_authenticating.connect(_on_peer_authenticating)
+	multiplayer.peer_authentication_failed.connect(_on_peer_authentication_failed)
+
+func _on_peer_authenticating(id: int) -> void:
+	# Both sides advertise themselves, so both can produce their own diagnosis.
+	multiplayer.send_auth(id, var_to_bytes({
+		"v": PROTOCOL_VERSION,
+		"name": name_field.text if is_instance_valid(name_field) else "",
+		"icon": icon_picker.selected if is_instance_valid(icon_picker) else 0,
+	}))
+
+func _on_auth_received(id: int, data: PackedByteArray) -> void:
+	# Hostile input: `bytes_to_var`, never the `_with_objects` variant.
+	var info: Variant = bytes_to_var(data)
+	if typeof(info) != TYPE_DICTIONARY:
+		_reject_peer(id, -1)
+		return
+	var their_version := int((info as Dictionary).get("v", -1))
+	if their_version != PROTOCOL_VERSION:
+		_reject_peer(id, their_version)
+		return
+	if multiplayer.is_server():
+		_pending_identity[id] = _identity_from_auth(info, id)
+	multiplayer.complete_auth(id)
+
+## Pulls a usable icon and name out of whatever a peer actually sent.
+func _identity_from_auth(info: Dictionary, id: int) -> Dictionary:
+	return {
+		"icon": clampi(int(info.get("icon", 0)), 0, ICONS.size() - 1),
+		"name": _clean_name(str(info.get("name", "")), id),
+	}
+
+func _reject_peer(id: int, their_version: int) -> void:
+	var theirs := "an unreadable handshake" if their_version < 0 else "protocol %d" % their_version
+	if multiplayer.is_server():
+		push_warning("Refused peer %d: %s, we speak %d" % [id, theirs, PROTOCOL_VERSION])
+		return                  # never complete auth; it times out and drops
+	# The server told us its version, so we can say exactly what is wrong.
+	_set_status("Cannot join: server speaks %s, this build speaks %d" % [theirs, PROTOCOL_VERSION])
+	_abort_connection.call_deferred()
+
+## Tearing the peer down has to wait for the current frame to finish. Doing it
+## inside `auth_callback` destroys the peer while the multiplayer layer is still
+## walking its own auth state, which segfaults the engine.
+func _abort_connection() -> void:
+	var peer := multiplayer.multiplayer_peer
+	if peer != null and not (peer is OfflineMultiplayerPeer):
+		peer.close()
+	multiplayer.multiplayer_peer = null
+	_clear_world()
+	lobby.show()
+
+func _on_peer_authentication_failed(id: int) -> void:
+	_pending_identity.erase(id)
+	if multiplayer.is_server() or multiplayer.multiplayer_peer == null:
+		return
+	_set_status("Handshake failed or timed out")
+	_abort_connection.call_deferred()
+
+# --- leaving politely ---------------------------------------------------------
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_shutdown_network()
+		get_tree().quit()
+
+func _exit_tree() -> void:
+	_shutdown_network()          # also covers a headless server being asked to stop
+
+## Closing the ENet peer sends a disconnect to everyone still listening, which
+## turns a ~10 second timeout into an immediate `peer_disconnected`.
+func _shutdown_network() -> void:
+	var peer := multiplayer.multiplayer_peer
+	# An OfflineMultiplayerPeer is the one Godot hands every tree; there is
+	# nobody to say goodbye to, and clearing it would strand the tree itself.
+	if peer == null or peer is OfflineMultiplayerPeer:
+		return
+	peer.close()
+	in_session = false
 
 func _connect_multiplayer_signals() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -378,7 +477,6 @@ func _on_host_button_pressed() -> void:
 	multiplayer.multiplayer_peer = peer
 	in_session = true
 	lobby.hide()
-	request_identity.rpc_id(1, icon_picker.selected, name_field.text)
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
 	server_add_player(1, _open_spawn())
@@ -416,7 +514,12 @@ func _on_peer_connected(id: int) -> void:
 		record_round.rpc_id(id, int(entry["round"]), int(entry["winner"]), entry["scores"])
 	# 2. existing players and items need no catch-up at all: the spawners replay
 	#    every live one, and the items carry their age as spawn state.
-	# 3. only the newcomer's own square has to be created
+	# 3. the identity we captured during the handshake, so the newcomer never
+	#    flickers as "Player 12345" with the default icon
+	var ident: Dictionary = _pending_identity.get(id, {})
+	_pending_identity.erase(id)
+	apply_identity.rpc(id, int(ident.get("icon", 0)), str(ident.get("name", "Player %d" % id)))
+	# 4. and only then, its square
 	server_add_player(id, _open_spawn())
 
 func _on_peer_disconnected(id: int) -> void:
@@ -428,7 +531,6 @@ func _on_peer_disconnected(id: int) -> void:
 func _on_connected_to_server() -> void:
 	in_session = true
 	lobby.hide()
-	request_identity.rpc_id(1, icon_picker.selected, name_field.text)
 	_set_status("Connected, I am peer %d" % multiplayer.get_unique_id())
 
 func _on_connection_failed() -> void:
@@ -520,18 +622,6 @@ func submit_input_for(id: int, tick: int, dir: Vector2) -> void:
 	if p.input_queue.size() >= INPUT_QUEUE_CAP:
 		p.input_queue.pop_front()               # flooding client: drop the oldest
 	p.input_queue.append({"tick": tick, "dir": dir.limit_length(1.0)})   # never trust the magnitude
-
-## Clients ask for an icon and a name; the server is the one that tells everybody.
-@rpc("any_peer", "call_local", "reliable")
-func request_identity(index: int, wanted: String) -> void:
-	if not multiplayer.is_server():
-		return
-	var id := multiplayer.get_remote_sender_id()
-	if id == 0:
-		id = 1                                  # host called it on itself
-	if index < 0 or index >= ICONS.size():
-		index = 0                               # never trust an any_peer argument
-	apply_identity.rpc(id, index, _clean_name(wanted, id))
 
 @rpc("authority", "call_local", "reliable")
 func apply_identity(id: int, index: int, display: String) -> void:

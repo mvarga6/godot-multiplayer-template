@@ -149,6 +149,36 @@ The arena is 2304×1296 — four viewports — carved into a 39×23 grid, so 19�
 That is too big to see at once, so a `Camera2D` follows your own square with smoothing, limited
 to the arena bounds. The lobby and HUD are `CanvasLayer`s and stay put.
 
+### The handshake
+
+Nothing joins until it has proved it speaks the same protocol. `PROTOCOL_VERSION` is bumped
+by hand whenever the RPC surface changes, and it rides in `multiplayer.auth_callback`
+alongside the player's name and icon.
+
+Using auth rather than a `hello` RPC matters for two reasons. `peer_connected` does not fire
+until auth completes, so a rejected client never reaches the point of having a square in the
+world — with a plain RPC we would have had to spawn first and clean up afterwards. And the
+accepted client arrives with its identity already known, so it never flickers as
+`Player 12345` with the default emoji for a few frames.
+
+Both sides advertise their version, so both can diagnose independently. The server logs
+`Refused peer 998613601: protocol 999, we speak 1` and simply never completes auth; the
+client gets to say exactly what is wrong:
+
+```
+Cannot join: server speaks protocol 999, this build speaks 1
+```
+
+which is the whole point, given stage 6's warning about version lock-step.
+
+### Leaving politely
+
+`auto_accept_quit` is off; `NOTIFICATION_WM_CLOSE_REQUEST` closes the ENet peer before
+quitting, and `_exit_tree` does the same for a headless server being stopped.
+
+This is worth more than it sounds. Measured: a peer that simply vanishes takes about **10
+seconds** for ENet to give up on. A peer that says goodbye is noticed in **0.00 s**.
+
 ### Names and icons
 
 Pick an emoji and type a name in the lobby before hosting or joining. The client sends both
@@ -359,6 +389,15 @@ corrected.
   returning early because `multiplayer_peer` is `null`?") rests on a false premise.
 - **GDScript's `\U` escape takes six hex digits, not eight.** `"\U0001F98A"` silently parses as
   U+0001F9 followed by a literal `8A`, so 🦊 renders as `ǹ8A`. Paste the emoji literally.
+- **Do not destroy the peer inside `auth_callback`.** Setting `multiplayer_peer = null` from
+  the callback tears the peer down while the multiplayer layer is still walking its own auth
+  state, and the engine **segfaults** — signal 11, with a backtrace through `libcoreclr`. The
+  message even prints first, so it looks like it worked. Defer the teardown with
+  `call_deferred`.
+- **`_exit_tree` must not clear the tree's peer unconditionally.** Godot's default
+  `OfflineMultiplayerPeer` belongs to the tree, not to your node; clearing it on the way out
+  stranded every later test in the shared runner with "no multiplayer peer". Skip the offline
+  peer, and close rather than null.
 - **`%-18s` does not align anything in a proportional font.** The results table looked like a
   drunk spreadsheet until it became a `GridContainer` with one `Label` per cell. Pad strings
   only under a monospace face.
@@ -407,8 +446,10 @@ playit.gg tunnel rather than the VPS the notes describe.
 From stage 7's menu: **A** (interpolation), **B** (prediction), **C** (reconciliation) and
 **D** (the collectible) are done. **E** is done: `MultiplayerSpawner`s replace every
 spawn/despawn RPC and per-node `MultiplayerSynchronizer`s replace the 20 Hz `update_state`
-broadcast. **F** (housekeeping: `Net` autoload, protocol version handshake,
-DTLS, graceful shutdown) is untouched.
+broadcast. From **F**: player names, the **protocol version handshake** and **graceful shutdown** are
+done. The `Net` autoload and DTLS are not — the autoload is only worth it if the game grows
+separate lobby/match scenes, and DTLS behind a tunnel would have to run without hostname
+verification, so it buys less than it looks.
 
 ### What stage 7E actually bought
 

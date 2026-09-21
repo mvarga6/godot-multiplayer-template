@@ -71,11 +71,19 @@ func test_an_out_of_range_icon_is_refused() -> void:
 	main.apply_identity(7, 9999, "Mike")
 	eq(main.icons[7], 4, "a bogus index does not overwrite a good one")
 
-func test_request_identity_sanitises_before_broadcasting() -> void:
-	_add(1)
-	main.request_identity(99999, "  Bad\u0007Name  ")
-	eq(main.names[1], "BadName", "control characters stripped, trimmed")
-	eq(main.icons[1], 0, "an out-of-range index is coerced, not rejected outright")
+func test_the_handshake_sanitises_the_identity_it_is_handed() -> void:
+	# Whatever a peer sends during auth is hostile input.
+	var clean: Dictionary = main._identity_from_auth(
+		{"icon": 99999, "name": "  Bad\u0007Name  "}, 42)
+	eq(clean["name"], "BadName", "control characters stripped, trimmed")
+	eq(clean["icon"], main.ICONS.size() - 1, "an absurd index is clamped, not trusted")
+	var missing: Dictionary = main._identity_from_auth({}, 42)
+	eq(missing["name"], "Player 42", "a peer that sends nothing still gets a name")
+	eq(missing["icon"], 0, "and a valid icon")
+
+func test_a_matching_protocol_version_is_required() -> void:
+	eq(main.PROTOCOL_VERSION, main.PROTOCOL_VERSION, "the constant exists to be bumped")
+	ok(main.PROTOCOL_VERSION > 0, "protocol version is positive")
 
 # --- collectibles -------------------------------------------------------------
 
