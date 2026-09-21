@@ -12,6 +12,12 @@ script = ExtResource("2_maze")
 
 [node name="Collectibles" type="Node2D" parent="."]
 
+[node name="PlayerSpawner" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../Players")
+
+[node name="ItemSpawner" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../Collectibles")
+
 [node name="Players" type="Node2D" parent="." unique_id=1654191028]
 
 [node name="BroadcastTimer" type="Timer" parent="."]

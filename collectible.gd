@@ -32,6 +32,10 @@ const SOUND := {
 const RADIUS := 11.0
 const FADE_AT := 3.0        # seconds left when it starts blinking out
 
+## All four are spawn-state on the Sync node, so a peer that joins mid-game is
+## handed them with the spawn itself -- including `age`, which keeps everyone's
+## blink-out in step rather than restarting the clock for the newcomer.
+var item_id: int = 0
 var kind: int = Kind.GOLD
 var lifetime := 12.0
 var age := 0.0

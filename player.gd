@@ -10,6 +10,14 @@ var input_dir: Vector2 = Vector2.ZERO   # last input actually applied
 var input_queue: Array = []             # inputs received but not yet applied
 var last_tick: int = 0                  # newest input consumed, echoed back to the owner
 
+## Replicated by the Sync node, server -> everyone, at SYNC_HZ.
+##
+## Deliberately NOT `position`: if the synchronizer wrote straight into
+## `position` it would overwrite the local prediction every tick and stamp on
+## the interpolation. It lands here instead, and `Main` decides what to do with
+## it — reconcile, if it is your own square; ease toward it, if it is not.
+var net_position: Vector2 = Vector2.ZERO
+
 # --- client-only state -------------------------------------------------------
 var target_position: Vector2 = Vector2.ZERO
 var is_local_authority := false         # true: we set position ourselves, do not interpolate
@@ -19,6 +27,7 @@ var _display := ""
 
 @onready var icon_label: Label = $Icon
 @onready var name_label: Label = $NameTag
+@onready var sync: MultiplayerSynchronizer = $Sync
 
 func setup(id: int) -> void:
 	peer_id = id

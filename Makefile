@@ -7,7 +7,11 @@ PROJECT := $(CURDIR)
 SYSTEMCTL ?= sudo systemctl
 PLAYIT ?= sudo playit
 
-.PHONY: server tunnel tunnel-stop tunnel-status tunnel-attach
+.PHONY: test server tunnel tunnel-stop tunnel-status tunnel-attach
+
+# Run the unit tests. Exits non-zero on failure, so this is CI-usable.
+test:
+	$(GODOT) --headless --path $(PROJECT) --script res://tests/run_tests.gd
 
 # Run the dedicated server in the foreground. Ctrl-C to stop.
 # Override the port with: make server PORT=9001

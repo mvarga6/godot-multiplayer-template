@@ -302,6 +302,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
+| `tests/` | A self-contained runner and 65 tests. `make test` |
 | `notes/` | The seven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
@@ -376,16 +377,84 @@ corrected.
 - **The mono editor prints `.NET Sdk not found`.** Harmless — this project is pure GDScript.
   Delete the `[dotnet]` section from `project.godot` to silence it.
 
+## Tests
+
+```bash
+make test        # 65 tests, ~1s, exits non-zero on failure
+```
+
+No addon and no download: `tests/run_tests.gd` is a `SceneTree` script that finds `test_*`
+methods on each suite and counts assertions. Godot hands every tree an
+`OfflineMultiplayerPeer`, so `is_server()` is true and `rpc()` runs locally — which means the
+whole game can be exercised in one process with no sockets.
+
+They cover the maze (determinism from a seed, solid border, every open cell reachable,
+collision queries), collectibles (weights, values, lifespan fade), `simulate()` (speed,
+frame-independence, diagonal parity, hostile input clamping, purity, wall collision, sliding,
+the unstick rule), parsing (`--port`, `host:port`, IPv6, name sanitising) and game flow
+(registry, identity, item pool, scoring, rounds, winning, restart, input validation,
+reconciliation, interpolation).
+
+Game logic is driven through `server_add_player` / `server_remove_player` /
+`server_add_item` / `server_remove_item` — a deliberate seam, so tests describe behaviour
+rather than whichever replication mechanism is underneath.
+
 ## Status
 
 Stages 1–7 are implemented and verified with real multi-process runs. Stage 6 went via a
 playit.gg tunnel rather than the VPS the notes describe.
 
 From stage 7's menu: **A** (interpolation), **B** (prediction), **C** (reconciliation) and
-**D** (the collectible) are done. **E** — replacing the hand-written RPCs with
-`MultiplayerSpawner` / `MultiplayerSynchronizer` — is deliberately not done; the point of this
-project is the manual version. **F** (housekeeping: `Net` autoload, protocol version
-handshake, player names, DTLS, graceful shutdown) is untouched.
+**D** (the collectible) are done. **E** is done: `MultiplayerSpawner`s replace every
+spawn/despawn RPC and per-node `MultiplayerSynchronizer`s replace the 20 Hz `update_state`
+broadcast. **F** (housekeeping: `Net` autoload, protocol version handshake,
+DTLS, graceful shutdown) is untouched.
+
+### What stage 7E actually bought
+
+Four RPCs are gone — `spawn_player`, `despawn_player`, `spawn_item`, `remove_item` — along
+with the `BroadcastTimer`, the `update_state` broadcast, and the whole late-join catch-up
+loop for players and items. What replaced them:
+
+| Was | Now |
+|---|---|
+| `spawn_player` / `despawn_player` RPC | `PlayerSpawner`, a `MultiplayerSpawner` |
+| `spawn_item` / `remove_item` RPC | `ItemSpawner`, via `add_spawnable_scene` |
+| `update_state` at 20 Hz | a `MultiplayerSynchronizer` per node |
+| per-item catch-up to a joiner | the spawners replay live nodes themselves |
+
+What remains hand-written is the part the nodes genuinely cannot do: `submit_input`
+(client to server, unreliable-ordered), the round and identity events, and `item_collected`,
+which carries the score and the kind so the collector — and only the collector — can play a
+sound.
+
+The synchronizer replicates `net_position` and `last_tick`, **not** `position`. Writing
+straight into `position` would overwrite the local prediction every tick and stamp on the
+interpolation; landing it in a separate field lets `_on_player_synchronized` decide —
+reconcile if it is your own square, ease toward it if it is not. Prediction and
+reconciliation survive the refactor unchanged.
+
+### Three things that cost real time
+
+- **`spawn_function` data is not replayed to late joiners; `add_spawnable_scene` is.** With a
+  custom spawn function, a peer joining mid-game saw an empty maze that slowly filled as new
+  items spawned. Switching the items to a spawnable scene, with `kind`, `lifetime`, `age`,
+  `position` and `item_id` as **spawn-state properties** (`spawn = true`) on the
+  synchronizer, fixed it — and `age` arriving with the spawn keeps the newcomer's blink-out
+  in step for free. Changing `Collectible` from `.new()` to a `PackedScene` was *not* what
+  fixed it, despite being a reasonable guess.
+- **`sync_world` was deleting the replay.** It called `_clear_items()` on the joiner, wiping
+  the items the spawner had just handed it. The spawner was working the whole time; the game
+  was destroying its output one frame later.
+- **A synchronizer whose `replication_config` is still empty when the node enters the tree
+  fails outright**, with `Condition "!sync->get_replication_config_ptr()" is true ...
+  ERR_UNCONFIGURED`. Building the config in `_ready()` is too late — it belongs in the
+  `.tscn` as a sub-resource.
+
+Two asymmetries worth remembering: `spawned` and `despawned` fire **only on peers that
+receive** a spawn, so the authority must register its own; and `_clear_items()` now runs on
+the server only, because the spawner sends each despawn — having every peer clear locally as
+well left clients with 189 items against the server's 19.
 
 There is **no authentication and no encryption**. The port is open to whoever finds it.
 `MAX_PLAYERS = 8` is the only thing standing between you and a stranger filling the arena.

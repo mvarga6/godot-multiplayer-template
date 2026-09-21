@@ -18,6 +18,7 @@ const LIFETIME_MAX := 18.0
 const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run ahead
 const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow it forever
 const PLAYER_SCENE := preload("res://player.tscn")
+const COLLECTIBLE_SCENE := preload("res://collectible.tscn")
 
 var players: Dictionary = {}   # peer_id:int -> Player node
 var scores: Dictionary = {}    # peer_id:int -> points this round
@@ -44,9 +45,10 @@ var input_tick := 0            # monotonically increasing sequence number
 var pending: Array = []        # inputs sent but not yet acknowledged by the server
 
 @onready var players_root: Node2D = $Players
+@onready var player_spawner: MultiplayerSpawner = $PlayerSpawner
+@onready var item_spawner: MultiplayerSpawner = $ItemSpawner
 @onready var maze: Maze = $Maze
 @onready var items_root: Node2D = $Collectibles
-@onready var broadcast_timer: Timer = $BroadcastTimer
 @onready var lobby: CanvasLayer = $Lobby
 @onready var ip_field: LineEdit = $Lobby/VBoxContainer/IpField
 @onready var status: Label = $Lobby/VBoxContainer/StatusLabel
@@ -67,6 +69,7 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 var _sfx: Dictionary = {}      # Collectible.Kind -> AudioStreamPlayer
 
 func _ready() -> void:
+	_setup_spawners()
 	_setup_audio()
 	_setup_camera()
 	_setup_icon_picker()
@@ -96,7 +99,6 @@ func _start_dedicated_server() -> void:
 	multiplayer.multiplayer_peer = peer
 	in_session = true
 	_new_maze()
-	broadcast_timer.start()
 	print("Dedicated server listening on UDP %d" % port)
 
 # --- the simulation ----------------------------------------------------------
@@ -121,6 +123,73 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 	if stuck or not Maze.is_blocked(try_y, HALF.y):
 		out = try_y
 	return out.clamp(HALF, ARENA - HALF)
+
+## Stage 7E: the two spawners replace the hand-written spawn/despawn RPCs, and
+## each player's MultiplayerSynchronizer replaces the 20 Hz `update_state`
+## broadcast. The spawners also replicate everything that already exists to a
+## peer that connects later, which is the whole late-join catch-up loop gone.
+func _setup_spawners() -> void:
+	player_spawner.spawn_function = _build_player
+	player_spawner.spawned.connect(_on_player_spawned)
+	player_spawner.despawned.connect(_on_player_despawned)
+	# Scene-based auto-spawn rather than a custom spawn_function: only this path
+	# replays already-live nodes to a peer that joins mid-game. Per-item data
+	# rides along as spawn-state properties on the Collectible's synchronizer.
+	item_spawner.add_spawnable_scene(COLLECTIBLE_SCENE.resource_path)
+	item_spawner.spawned.connect(_on_item_spawned)
+	item_spawner.despawned.connect(_on_item_despawned)
+
+# --- spawn functions: run on every peer, building the node from the same data --
+
+func _build_player(data: Dictionary) -> Node:
+	var p := PLAYER_SCENE.instantiate()
+	p.setup(int(data["id"]))
+	p.position = data["pos"]
+	p.net_position = data["pos"]
+	p.target_position = data["pos"]
+	return p
+
+# --- registry upkeep, driven by the spawners rather than by hand --------------
+
+func _on_player_spawned(node: Node) -> void:
+	var id: int = node.peer_id
+	players[id] = node
+	if not scores.has(id):
+		scores[id] = 0
+	if not rounds_won.has(id):
+		rounds_won[id] = 0
+	node.set_identity(ICONS[int(icons.get(id, 0))], str(names.get(id, "Player %d" % id)))
+	# The server owns every square. A client predicts only its own and
+	# interpolates everyone else toward whatever the synchronizer delivers.
+	node.is_local_authority = multiplayer.is_server() or id == multiplayer.get_unique_id()
+	node.sync.synchronized.connect(_on_player_synchronized.bind(node))
+	_refresh_scores()
+	print("[%d] spawned %d at %s" % [multiplayer.get_unique_id(), id, node.position])
+
+func _on_item_spawned(node: Node) -> void:
+	items[node.item_id] = node
+
+func _on_item_despawned(node: Node) -> void:
+	items.erase(node.item_id)
+
+func _on_player_despawned(node: Node) -> void:
+	var id: int = node.peer_id
+	players.erase(id)
+	scores.erase(id)
+	rounds_won.erase(id)
+	icons.erase(id)
+	names.erase(id)
+	_refresh_scores()
+	print("[%d] despawned %d" % [multiplayer.get_unique_id(), id])
+
+## What `update_state` used to do, now driven by the synchronizer's own signal.
+func _on_player_synchronized(node: Node) -> void:
+	if multiplayer.is_server():
+		return                      # the server already has the truth
+	if node.peer_id == multiplayer.get_unique_id():
+		_reconcile(node, node.net_position, node.last_tick)
+	else:
+		node.target_position = node.net_position
 
 func _setup_audio() -> void:
 	if is_dedicated or DisplayServer.get_name() == "headless":
@@ -233,6 +302,8 @@ func _server_simulate(delta: float) -> void:
 			# Nothing arrived in time. Assume they are still holding the same
 			# key; if that guess is wrong, reconciliation fixes it.
 			p.position = simulate(p.position, p.input_dir, delta)
+	for id in players:
+		players[id].net_position = players[id].position
 	_expire_items(delta)
 	_check_pickup()
 	_top_up_items()
@@ -247,7 +318,7 @@ func _check_pickup() -> void:
 				continue
 			var after := int(scores.get(pid, 0)) + int(Collectible.VALUE[item.kind])
 			scores[pid] = after
-			remove_item.rpc(iid, pid, after)
+			server_remove_item(iid, pid, after)
 			# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
 			if after >= WIN_SCORE:
 				_finish_round(pid)
@@ -260,7 +331,7 @@ func _expire_items(delta: float) -> void:
 		var item: Collectible = items[iid]
 		item.age += delta                  # the server ages them too; it does not _process
 		if item.age >= item.lifetime:
-			remove_item.rpc(iid, 0, 0)     # peer 0 == nobody collected it
+			server_remove_item(iid, 0, 0)  # peer 0 == nobody collected it
 
 ## Server only: keep between MIN_ITEMS and MAX_ITEMS lying around.
 func _top_up_items() -> void:
@@ -277,9 +348,7 @@ func _spawn_item() -> bool:
 	var pos := _free_item_point(rng)
 	if pos == Vector2.ZERO:
 		return false                   # no maze yet, or nowhere free
-	var id := _next_item_id
-	_next_item_id += 1
-	spawn_item.rpc(id, Collectible.random_kind(rng), pos,
+	server_add_item(Collectible.random_kind(rng), pos,
 		rng.randf_range(LIFETIME_MIN, LIFETIME_MAX))
 	return true
 
@@ -298,16 +367,6 @@ func _free_item_point(rng: RandomNumberGenerator) -> Vector2:
 			return p
 	return Maze.random_open_point(rng)
 
-func _on_broadcast_timer_timeout() -> void:
-	if not multiplayer.is_server() or players.is_empty():
-		return
-	var state := {}
-	var acks := {}
-	for id in players:
-		state[id] = players[id].position
-		acks[id] = players[id].last_tick
-	update_state.rpc(state, acks)
-
 # --- lobby -------------------------------------------------------------------
 
 func _on_host_button_pressed() -> void:
@@ -322,8 +381,7 @@ func _on_host_button_pressed() -> void:
 	request_identity.rpc_id(1, icon_picker.selected, name_field.text)
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
-	broadcast_timer.start()
-	spawn_player.rpc(1, _open_spawn())     # "call_local" means this also runs here
+	server_add_player(1, _open_spawn())
 
 func _on_join_button_pressed() -> void:
 	# A tunnel (playit.gg) hands out an arbitrary public port, so the field
@@ -356,22 +414,16 @@ func _on_peer_connected(id: int) -> void:
 		round_index, game_finished)
 	for entry in round_history:
 		record_round.rpc_id(id, int(entry["round"]), int(entry["winner"]), entry["scores"])
-	for iid in items:
-		var it: Collectible = items[iid]
-		# `lifetime` here is what is LEFT, so the newcomer's blink-out lines up
-		# with everyone else's rather than restarting the clock.
-		spawn_item.rpc_id(id, iid, it.kind, it.position, maxf(it.lifetime - it.age, 0.5))
-	# 2. catch the newcomer up on everyone already here
-	for existing_id in players:
-		spawn_player.rpc_id(id, existing_id, players[existing_id].position)
-	# 3. tell everyone (including this server) about the newcomer
-	spawn_player.rpc(id, _open_spawn())
+	# 2. existing players and items need no catch-up at all: the spawners replay
+	#    every live one, and the items carry their age as spawn state.
+	# 3. only the newcomer's own square has to be created
+	server_add_player(id, _open_spawn())
 
 func _on_peer_disconnected(id: int) -> void:
 	print("[%d] peer_disconnected: %d" % [multiplayer.get_unique_id(), id])
 	if not multiplayer.is_server():
 		return
-	despawn_player.rpc(id)
+	server_remove_player(id)
 
 func _on_connected_to_server() -> void:
 	in_session = true
@@ -390,41 +442,62 @@ func _on_server_disconnected() -> void:
 	lobby.show()
 	_set_status("Server disconnected")
 
+# --- server-side entry points -------------------------------------------------
+#
+# Everything on the server that creates or destroys a replicated thing goes
+# through these four. They are the seam: what sits underneath can change (a
+# hand-written RPC, a MultiplayerSpawner) without the game logic above noticing.
+
+func server_add_player(id: int, pos: Vector2) -> void:
+	if players.has(id):
+		return                      # idempotent: a duplicate spawn is harmless
+	var node: Node = player_spawner.spawn({"id": id, "pos": pos})
+	# `spawned` only fires on peers that *receive* a spawn, so the authority
+	# registers its own. Clients get there through the signal.
+	if node != null:
+		_on_player_spawned(node)
+
+func server_remove_player(id: int) -> void:
+	if not players.has(id):
+		return
+	var node: Node = players[id]
+	_on_player_despawned(node)      # same asymmetry as spawning
+	node.queue_free()               # the spawner replicates the despawn
+
+func server_add_item(kind: int, pos: Vector2, lifetime: float) -> int:
+	var iid := _next_item_id
+	_next_item_id += 1
+	var c: Collectible = COLLECTIBLE_SCENE.instantiate()
+	c.item_id = iid
+	c.setup(kind, lifetime)
+	c.position = pos
+	items_root.add_child(c, true)   # the spawner notices and replicates
+	items[iid] = c                  # `spawned` is remote-only, so register ours
+	return iid
+
+## `collector` is 0 when the item simply timed out. The despawn itself rides on
+## the spawner; only the score and the sound need saying out loud.
+func server_remove_item(iid: int, collector: int, new_score: int) -> void:
+	if not items.has(iid):
+		return
+	var node: Collectible = items[iid]
+	if collector != 0:
+		# The despawn itself rides on the spawner; this carries only the score
+		# and the kind, which is all the collector needs to play its sound.
+		item_collected.rpc(collector, new_score, node.kind)
+	items.erase(iid)                # same asymmetry: despawned is remote-only
+	_desired_items = randi_range(MIN_ITEMS, MAX_ITEMS)
+	node.queue_free()
+
 # --- rpcs --------------------------------------------------------------------
 
 @rpc("authority", "call_local", "reliable")
-func spawn_player(id: int, pos: Vector2) -> void:
-	if players.has(id):
-		return                     # idempotent: a duplicate spawn is harmless
-	var p := PLAYER_SCENE.instantiate()
-	p.setup(id)
-	p.position = pos
-	p.target_position = pos
-	# The server simulates every square itself. A client predicts only its own
-	# and interpolates everyone else's toward the broadcast position.
-	p.is_local_authority = multiplayer.is_server() or id == multiplayer.get_unique_id()
-	players_root.add_child(p)
-	players[id] = p
-	if not scores.has(id):
-		scores[id] = 0
-	if not rounds_won.has(id):
-		rounds_won[id] = 0
-	p.set_identity(ICONS[int(icons.get(id, 0))], str(names.get(id, "Player %d" % id)))
+func item_collected(collector: int, new_score: int, kind: int) -> void:
+	scores[collector] = new_score
+	if collector == multiplayer.get_unique_id() and not is_dedicated:
+		_play_pickup(kind)
 	_refresh_scores()
-	print("[%d] spawned %d at %s" % [multiplayer.get_unique_id(), id, pos])
-
-@rpc("authority", "call_local", "reliable")
-func despawn_player(id: int) -> void:
-	if not players.has(id):
-		return
-	players[id].queue_free()
-	players.erase(id)
-	scores.erase(id)
-	rounds_won.erase(id)
-	icons.erase(id)
-	names.erase(id)
-	_refresh_scores()
-	print("[%d] despawned %d" % [multiplayer.get_unique_id(), id])
+	print("[%d] %d picked up, now on %d" % [multiplayer.get_unique_id(), collector, new_score])
 
 @rpc("any_peer", "call_local", "unreliable_ordered")
 func submit_input(tick: int, dir: Vector2) -> void:
@@ -433,6 +506,11 @@ func submit_input(tick: int, dir: Vector2) -> void:
 	var id := multiplayer.get_remote_sender_id()
 	if id == 0:
 		id = 1                                  # host called it on itself
+	submit_input_for(id, tick, dir)
+
+## The validation, separated from "who sent it". Everything here treats its
+## arguments as hostile, because `submit_input` is reachable by anyone.
+func submit_input_for(id: int, tick: int, dir: Vector2) -> void:
 	if not players.has(id):
 		return
 	var p: Node2D = players[id]
@@ -442,50 +520,6 @@ func submit_input(tick: int, dir: Vector2) -> void:
 	if p.input_queue.size() >= INPUT_QUEUE_CAP:
 		p.input_queue.pop_front()               # flooding client: drop the oldest
 	p.input_queue.append({"tick": tick, "dir": dir.limit_length(1.0)})   # never trust the magnitude
-
-@rpc("authority", "unreliable")
-func update_state(state: Dictionary, acks: Dictionary) -> void:
-	if multiplayer.is_server():
-		return                       # the server already has the truth
-	var me := multiplayer.get_unique_id()
-	for id in state:
-		if not players.has(id):
-			continue
-		var p: Node2D = players[id]
-		if id == me:
-			_reconcile(p, state[id], int(acks.get(id, 0)))
-		else:
-			p.target_position = state[id]    # _process eases toward it
-
-@rpc("authority", "call_local", "reliable")
-func spawn_item(id: int, kind: int, pos: Vector2, lifetime: float) -> void:
-	if items.has(id):
-		return
-	var c := Collectible.new()
-	c.name = "item_%d" % id
-	c.setup(kind, lifetime)
-	c.position = pos
-	items_root.add_child(c)
-	items[id] = c
-
-## `collector` is 0 when the item simply timed out.
-@rpc("authority", "call_local", "reliable")
-func remove_item(id: int, collector: int, new_score: int) -> void:
-	if not items.has(id):
-		return
-	var c: Collectible = items[id]
-	items.erase(id)
-	c.queue_free()
-	_desired_items = randi_range(MIN_ITEMS, MAX_ITEMS)
-	if collector == 0:
-		return                     # timed out; nobody grabbed it, nobody hears it
-	if collector == multiplayer.get_unique_id() and not is_dedicated:
-		_play_pickup(c.kind)
-	scores[collector] = new_score
-	_refresh_scores()
-	print("[%d] %d picked up %s, now on %d" % [
-		multiplayer.get_unique_id(), collector,
-		Collectible.Kind.keys()[c.kind], new_score])
 
 ## Clients ask for an icon and a name; the server is the one that tells everybody.
 @rpc("any_peer", "call_local", "reliable")
@@ -526,7 +560,8 @@ func _clean_name(raw: String, id: int) -> String:
 func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: Dictionary,
 		round_no: int) -> void:
 	_apply_maze(seed_value)
-	_clear_items()
+	if multiplayer.is_server():
+		_clear_items()         # clients get a despawn per item from the spawner
 	rounds_won = standings.duplicate()
 	round_index = round_no
 	for id in scores:
@@ -597,7 +632,8 @@ func sync_world(seed_value: int, all_scores: Dictionary, standings: Dictionary,
 	names = all_names.duplicate()
 	round_index = round_no
 	game_finished = finished
-	_clear_items()
+	# Deliberately does NOT clear items: the spawner has already replayed every
+	# live one to us, and wiping them here is exactly how they went missing.
 	round_history.clear()
 	_refresh_scores()
 
