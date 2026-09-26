@@ -1,4 +1,4 @@
-# online-1
+# A Mazing Game
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
 move with the arrow keys through a randomly generated lava maze, racing to grab gold, rubies,
