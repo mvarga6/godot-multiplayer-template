@@ -24,6 +24,11 @@ window/stretch/aspect="expand"
 
 project/assembly_name="Online 1"
 
+[editor]
+
+version_control/plugin_name="GitPlugin"
+version_control/autoload_on_startup=true
+
 [physics]
 
 3d/physics_engine="Jolt Physics"
