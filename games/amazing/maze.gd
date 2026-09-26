@@ -28,7 +28,7 @@ const OPEN_FRACTION := 0.62
 var grid := PackedByteArray()   # COLS*ROWS, 1 = wall, 0 = open
 var current_seed := 0
 
-var cell := Vector2.ZERO        # set by generate(), from World.ARENA
+var cell := Vector2.ZERO        # set by generate(), from AmazingWorld.ARENA
 
 # --- generation --------------------------------------------------------------
 

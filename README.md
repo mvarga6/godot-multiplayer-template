@@ -134,8 +134,38 @@ If you add a field to an RPC, measure it: `var_to_bytes([args]).size()`. Anythin
 ### Lobbies
 
 Connecting to the server is not the same as joining a game. You connect, land on a browser
-listing every game and who is in it, and then create one (by name) or join one. Several run
-at once and cannot see each other.
+listing every game, its **type** and who is in it, and then create one (name + type) or join
+one. Several run at once and cannot see each other.
+
+The server hosts *game types*, not one hard-coded game. A lobby is a name plus a type, and
+the type decides which scene becomes that lobby's World:
+
+```gdscript
+static var TYPES := {
+    "amazing": {"name": "A Mazing", "blurb": "...", "scene": "res://world.tscn"},
+}
+```
+
+Every game extends `GameWorld`, which carries the parts that are true of *any* game running
+as one lobby among several: which lobby it is, who may see it, and the methods `Main` calls.
+A game overrides four — `_setup`, `server_prepare`, `server_admit`, `server_evict` — and
+inherits the rest.
+
+`main.gd` contains no mention of mazes, gems, weapons or rounds. The HUD takes **text**: the
+game composes its own scoreboard and status line and calls `set_score_line()` /
+`set_status_line()`, and supplies the end-of-game grid as rows of cells via
+`results_table()`. Pickup sounds and key bindings belong to the game too — the shell only
+owns the music, the join chime and the identity of each peer.
+
+Each game keeps its scenes, art and audio under `games/<id>/`, so the repo root holds the
+server and nothing else.
+A test registers a second type at runtime and checks that creation, the digest and the
+spawned scene all follow it, with no change anywhere else; that is the only way to know an
+abstraction is real rather than decorative.
+
+`TYPES` is a `static var` rather than a `const` because a `const` Dictionary refuses new keys
+outright — "Cannot assign a new value to a constant" — and a registry you cannot register
+into is a lookup table wearing a registry's name.
 
 `Main` owns the socket, the handshake, the identities and the screen. Each game is a `World`
 node under `Worlds`. The server holds every World and simulates all of them; a client holds
@@ -407,7 +437,9 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | File | What it is |
 |---|---|
 | `main.gd` / `main.tscn` | The shell: connection, handshake, identities, lobby registry, the browser, the screen |
-| `world.gd` / `world.tscn` | One running game: its maze, gems, shots, scores and rounds. The server runs several. |
+| `game_type.gd` | The catalogue of games this server hosts, and what scene each one spawns |
+| `game_world.gd` | Base class for any game: lobby identity, visibility gating, the methods `Main` calls |
+| `games/amazing/` | "A Mazing" — its World, maze, player, gems, projectiles, weapons, art and sounds |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |

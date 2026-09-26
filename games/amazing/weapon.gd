@@ -25,7 +25,7 @@ const SPECS := {
 		"freeze_seconds": 0.0,
 		"steal_points": 0,
 		"colour": Color(0.45, 0.95, 1.0),
-		"texture": preload("res://assets/net.png"),
+		"texture": preload("res://games/amazing/assets/net.png"),
 		"spin": 10.0,               # radians/sec, purely cosmetic
 	},
 	Kind.FREEZE: {
@@ -42,7 +42,7 @@ const SPECS := {
 		"freeze_seconds": 3.0,
 		"steal_points": 0,
 		"colour": Color(0.65, 0.80, 1.0),
-		"texture": preload("res://assets/freeze.png"),
+		"texture": preload("res://games/amazing/assets/freeze.png"),
 		"spin": 5.2,                # radians/sec: a tumbling shard
 	},
 	Kind.STEAL: {

@@ -70,9 +70,9 @@ func make_main() -> Node2D:
 ## A Main with one World inside it, acting as its own server, with the local
 ## player already "in" that lobby. This is the shape stage 9 made normal: the
 ## shell owns the connection, the World owns the game.
-func make_world() -> World:
+func make_world() -> GameWorld:
 	var main := make_main()
-	var w: World = (load("res://world.tscn") as PackedScene).instantiate()
+	var w: GameWorld = (load("res://games/amazing/amazing_world.tscn") as PackedScene).instantiate()
 	w.lobby_id = 1
 	w.maze_seed = 20260926
 	main.lobbies[1] = {"name": "test game", "members": []}
@@ -83,7 +83,7 @@ func make_world() -> World:
 	return w
 
 ## Free the World's Main, which takes the World with it.
-func drop_world(w: World) -> void:
+func drop_world(w: GameWorld) -> void:
 	if is_instance_valid(w) and w.game != null:
 		drop_main(w.game)
 

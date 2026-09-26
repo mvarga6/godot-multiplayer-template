@@ -4,7 +4,7 @@ extends GameTest
 
 const TICK := 1.0 / 60.0
 
-var world: World
+var world: GameWorld
 var main: Node2D
 
 func before_each() -> void:

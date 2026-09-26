@@ -1,6 +1,6 @@
 [gd_scene load_steps=3 format=3]
 
-[ext_resource type="Script" path="res://projectile.gd" id="1_projectile"]
+[ext_resource type="Script" path="res://games/amazing/projectile.gd" id="1_projectile"]
 
 [sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_shot"]
 properties/0/path = NodePath(".:position")

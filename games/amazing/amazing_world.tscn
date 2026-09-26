@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3]
 
-[ext_resource type="Script" path="res://world.gd" id="1_world"]
-[ext_resource type="Script" path="res://maze.gd" id="2_maze"]
+[ext_resource type="Script" path="res://games/amazing/amazing_world.gd" id="1_world"]
+[ext_resource type="Script" path="res://games/amazing/maze.gd" id="2_maze"]
 
 [sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_world"]
 properties/0/path = NodePath(".:lobby_id")

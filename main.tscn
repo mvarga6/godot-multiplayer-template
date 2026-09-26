@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://cqdf1yprlm4ju"]
 
 [ext_resource type="AudioStream" path="res://audio/background.mp3" id="3_music"]
-[ext_resource type="Script" uid="uid://d2espvwu27hmv" path="res://main.gd" id="1_main"]
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
 
 [node name="Main" type="Node2D" unique_id=1686026068]
 script = ExtResource("1_main")
@@ -136,7 +136,7 @@ theme_override_constants/v_separation = 4
 layout_mode = 2
 text = "Play again"
 
-[node name="WeaponLabel" type="Label" parent="Hud"]
+[node name="StatusLabel" type="Label" parent="Hud"]
 offset_left = 16.0
 offset_top = 62.0
 offset_right = 700.0
@@ -184,6 +184,9 @@ theme_override_constants/separation = 8
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "name your game"
+
+[node name="TypePicker" type="OptionButton" parent="Browser/Root/Box/New"]
+layout_mode = 2
 
 [node name="Create" type="Button" parent="Browser/Root/Box/New"]
 layout_mode = 2

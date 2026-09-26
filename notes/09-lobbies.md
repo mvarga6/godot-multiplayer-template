@@ -153,10 +153,35 @@ Five processes: a dedicated server and four clients. Two create games, two join 
 - **Two lobbies walk through each other's walls.** The maze is still static.
 - **A newcomer sees raw peer ids instead of names.** Identity was broadcast with `rpc()`
   before they connected. Replay the table.
+- **`const` Dictionaries refuse new keys.** Assigning to an existing key works, adding one
+  does not, and the parser catches it. A registry has to be a `static var`.
 - **The first lobby vanishes when you create a second.** Empty lobbies are pruned, and the
   creator moved out of the first into the second.
 
 ---
+
+## Game types
+
+A lobby is a *name* plus a *type*. The type is a row in `game_type.gd` saying what to call
+the game and which scene to spawn as its World:
+
+```gdscript
+static var TYPES := {
+    "amazing": {"name": "A Mazing", "blurb": "...", "scene": "res://world.tscn"},
+}
+```
+
+The interesting part is not the table, it is what the table forces. For a second game to be
+possible, `Main` must not know what the first one *is*. So the interface narrows to six
+methods — `server_prepare`, `server_admit`, `server_evict`, `refresh_visibility`, `is_local`,
+`gate` — and everything maze-shaped moves behind them. Main used to call
+`world._open_spawn()` to pick a start position; now it calls `world.server_admit(peer)` and
+the game decides what arriving means.
+
+The test of an abstraction is whether a second implementation costs anything. One test
+registers a second type at runtime, creates a lobby of it, and checks that the lobby, the
+browser digest and the spawned scene all follow — without touching `main.gd`. If that test
+had needed a code change to pass, the seam would have been in the wrong place.
 
 ## A footnote: the join chime
 

@@ -1,43 +1,102 @@
-class_name World
-extends Node2D
+class_name AmazingWorld
+extends GameWorld
 
-## One running game: its own maze, its own gems, its own scores and rounds.
+## "A Mazing": gems in a lava maze, three weapons, first to 25 takes the round.
 ##
-## Stage 9 made this a per-lobby node rather than the whole program. A server
-## runs one World per lobby, all simulating at once; a client is handed exactly
-## one, because every node inside carries a MultiplayerSynchronizer whose
-## visibility is gated on lobby membership. Two games therefore cannot see, hit
-## or score off each other.
-##
-## `Main` owns the connection, the identities and the screen. This owns the game.
-
-## Spawn state: replicated with the World itself, so a client that receives one
-## knows which lobby it is and can generate the matching maze immediately.
-var lobby_id: int = 0
-
-## Set by Main. The shell we ask for identities, sounds and screen space.
-var game: Node = null
-
-@onready var sync: MultiplayerSynchronizer = $Sync
-
-var _gated: Array[MultiplayerSynchronizer] = []
+## Everything here is this game's own. The lobby plumbing -- which lobby it is,
+## who may see it, and the methods `Main` calls -- lives in `GameWorld`.
 
 ## Arriving in a game hands you everyone already in it, one spawn each. Without
 ## this, joining a four-player game would play the join chime four times.
 const JOIN_CHIME_ARM_DELAY := 0.75
-var _announce_joins := false
 
-func _ready() -> void:
-	game = get_parent().get_parent()
-	gate(self)
+var _announce_joins := false
+var _sfx: Dictionary = {}      # Collectible.Kind -> AudioStreamPlayer
+
+## Called by GameWorld once we are in the tree, on every peer that has us.
+func _setup() -> void:
 	_setup_spawners()
+	_setup_audio()
+	_setup_input()
 	if maze_seed != 0:
 		_apply_maze(maze_seed)     # clients get the seed as spawn state
-	if not multiplayer.is_server():
-		# Tell the server we exist. It waits for this before putting our square
-		# in, because spawning a player into a World the client has not received
-		# yet fails with "Node not found: .../PlayerSpawner".
-		game.world_ready.rpc_id(1, lobby_id)
+	refresh_hud()
+
+## Our own sounds, our own players. A world in another lobby never plays them
+## because everything here is guarded on `is_local()`.
+func _setup_audio() -> void:
+	if DisplayServer.get_name() == "headless":
+		return                     # a VPS has no speakers
+	for kind in Collectible.SOUND:
+		var p := AudioStreamPlayer.new()
+		p.stream = Collectible.SOUND[kind]
+		p.volume_db = -4.0
+		add_child(p)
+		_sfx[kind] = p
+
+## Deliberately local-only: you hear your own pickups, never anyone else's.
+func play_pickup(kind: int) -> void:
+	if is_local() and _sfx.has(kind):
+		_sfx[kind].play()
+
+## Our keys, registered by us. Physical keycodes, so A/S/D are still where your
+## fingers are on AZERTY.
+func _setup_input() -> void:
+	_bind_key("fire", KEY_SPACE)
+	for kind in Weapon.Kind.values():
+		_bind_key(Weapon.action(kind), Weapon.key(kind))
+
+func _bind_key(action: String, key: Key) -> void:
+	if InputMap.has_action(action):
+		return
+	InputMap.add_action(action)
+	var ev := InputEventKey.new()
+	ev.physical_keycode = key
+	InputMap.action_add_event(action, ev)
+
+## Both HUD lines, composed here and handed to the shell as text.
+func refresh_hud() -> void:
+	var ids: Array = scores.keys()
+	ids.sort()
+	var parts := PackedStringArray()
+	for id in ids:
+		parts.append("%s %d/%d  wins %d" % [
+			game.label_for(id), int(scores[id]), WIN_SCORE, int(rounds_won.get(id, 0))])
+	set_score_line("    ".join(parts))
+
+	var weapons := PackedStringArray()
+	for kind in Weapon.Kind.values():
+		var key := Weapon.key_label(kind)
+		var mark := "[%s]" % key if kind == selected_weapon else " %s " % key
+		var price := Weapon.cost(kind)
+		weapons.append("%s %s %s%s" % [
+			mark, Weapon.glyph(kind), Weapon.label(kind),
+			"" if price == 0 else " (%d)" % price])
+	set_status_line("  ".join(weapons) + "   SPACE to fire")
+
+## The end-of-game table, as rows of cells. The shell knows how to draw a grid;
+## it does not know what a round is.
+func results_table() -> Array:
+	var ids: Array = rounds_won.keys()
+	ids.sort()
+	var rows := []
+	var header := [{"text": "round", "strong": true}]
+	for id in ids:
+		header.append({"text": game.label_for(id), "strong": true})
+	rows.append(header)
+	for entry in round_history:
+		var row := [{"text": str(int(entry["round"]))}]
+		var round_scores: Dictionary = entry["scores"]
+		for id in ids:
+			var won: bool = int(entry["winner"]) == id
+			row.append({"text": "%d%s" % [int(round_scores.get(id, 0)), "  ★" if won else ""],
+				"strong": won})
+		rows.append(row)
+	var totals := [{"text": "rounds won", "strong": true}]
+	for id in ids:
+		totals.append({"text": str(int(rounds_won.get(id, 0))), "strong": true})
+	rows.append(totals)
+	return rows
 
 ## Should this peer's arrival be announced on this screen?
 ##
@@ -51,115 +110,115 @@ func should_announce_join(peer_id: int) -> bool:
 		return false
 	return _announce_joins
 
+
 func _arm_join_chime() -> void:
 	_announce_joins = false
 	await get_tree().create_timer(JOIN_CHIME_ARM_DELAY).timeout
 	_announce_joins = true
 
-## True when the local player is playing *this* game rather than another lobby's.
-func is_local() -> bool:
-	return game != null and game.my_lobby_id == lobby_id
 
-## Gate a node's synchronizer on lobby membership.
-##
-## This is what keeps two games apart. MultiplayerSpawner has no visibility API
-## of its own, but a spawn is only delivered to peers that can see the spawned
-## node's synchronizer -- so filtering here filters the spawn as well as the
-## updates, and a peer in another lobby never learns the node exists.
-func gate(node: Node) -> void:
-	var s: MultiplayerSynchronizer = node.get_node_or_null("Sync")
-	if s == null:
-		return
-	s.public_visibility = false
-	s.visibility_update_mode = MultiplayerSynchronizer.VISIBILITY_PROCESS_IDLE
-	if s.has_meta("gated"):
-		return                      # MultiplayerSynchronizer has no way to ask
-	s.set_meta("gated", true)
-	_gated.append(s)
-	_apply_visibility(s)
+# --- the contract Main talks to ------------------------------------------------
+#
+# Main knows a lobby has a World and that players go into it. It does not know
+# about mazes, gems or rounds, which is what lets a second game type exist.
 
-## Set visibility per peer, explicitly, rather than installing a filter
-## callable: a filter is only re-evaluated on the synchronizer's own schedule,
-## and a spawn withheld before you joined is not reissued when it next runs.
-## `set_visibility_for` does reissue it, which is the whole mechanism here.
-func refresh_visibility() -> void:
-	if not is_inside_tree() or multiplayer == null:
-		return
-	if not multiplayer.has_multiplayer_peer() or not multiplayer.is_server():
-		return
-	var alive: Array[MultiplayerSynchronizer] = []
-	for s in _gated:
-		if is_instance_valid(s):
-			alive.append(s)
-	for peer in multiplayer.get_peers():
-		var visible := _can_see(peer)
-		# Grant outside-in, revoke inside-out. Hiding the World despawns its
-		# whole subtree on that peer, so a child despawn sent afterwards finds
-		# nothing and logs ERR_UNAUTHORIZED once per item and player.
-		var order := alive.duplicate()
-		if not visible:
-			order.reverse()
-		for s in order:
-			s.set_visibility_for(peer, visible)
+## Called before the World enters the tree, so anything set here rides along as
+## spawn state. For this game that means choosing the maze.
+func server_prepare() -> void:
+	maze_seed = randi()
 
-func _apply_visibility(s: MultiplayerSynchronizer) -> void:
-	# `multiplayer` is null until the node is in the tree, and gating happens
-	# before that on purpose, so a spawn never leaks. Membership is applied
-	# again by `refresh_visibility` once we are in.
-	if not is_inside_tree() or multiplayer == null:
-		return
-	if not multiplayer.has_multiplayer_peer() or not multiplayer.is_server():
-		return
-	for peer in multiplayer.get_peers():
-		s.set_visibility_for(peer, _can_see(peer))
 
-func _can_see(peer: int) -> bool:
-	return game != null and game.is_member(lobby_id, peer)
+## Put a peer into this game. Where they land is the game's business.
+func server_admit(peer: int) -> void:
+	server_add_player(peer, _open_spawn())
+
+
+func server_evict(peer: int) -> void:
+	server_remove_player(peer)
+
 
 const SPEED := 220.0
+
 const ARENA := Vector2(2304, 1296)  # a game rule, not a window size
+
 const HALF := Vector2(16, 16)
+
 const WIN_SCORE := 25            # points that win the round; the maze then regenerates
+
 const GAME_WINS := 3            # rounds won that take the whole game
+
 const MIN_ITEMS := 14            # how many collectibles are in the maze at once
+
 const MAX_ITEMS := 20            # the arena is 4x what it was, so the count scaled with it
+
 const LIFETIME_MIN := 8.0        # seconds a collectible survives before it rots away
+
 const LIFETIME_MAX := 18.0
+
 const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run ahead
+
 const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow it forever
-const PLAYER_SCENE := preload("res://player.tscn")
-const COLLECTIBLE_SCENE := preload("res://collectible.tscn")
-const PROJECTILE_SCENE := preload("res://projectile.tscn")
+
+const PLAYER_SCENE := preload("res://games/amazing/player.tscn")
+
+const COLLECTIBLE_SCENE := preload("res://games/amazing/collectible.tscn")
+
+const PROJECTILE_SCENE := preload("res://games/amazing/projectile.tscn")
+
 ## Where a shot is born, measured out from the player's centre so it does not
 ## immediately collide with the shooter's own square.
 const MUZZLE_OFFSET := HALF.x + Weapon.RADIUS + 2.0
 
+
 var players: Dictionary = {}   # peer_id:int -> Player node
+
 var scores: Dictionary = {}    # peer_id:int -> points this round
+
 var rounds_won: Dictionary = {}  # peer_id:int -> rounds won
+
 var round_history: Array = []  # one {round, winner, scores} per finished round
+
 var round_index := 1
+
 var game_finished := false
+
 var maze_seed := 0             # server: the seed every peer is currently generating from
+
 var items: Dictionary = {}     # item_id:int -> Collectible node
+
 var _next_item_id := 1         # server: hands out item ids
+
 var _desired_items := MIN_ITEMS
+
 var shots: Dictionary = {}     # shot_id:int -> Projectile node
+
 var _next_shot_id := 1         # server: hands out shot ids
+
 var selected_weapon := Weapon.Kind.CAPTURE   # client-local: which key you last pressed
+
 var local_facing: Vector2 = Vector2.RIGHT    # client-local, for the aim indicator
+
 
 # Client-side prediction bookkeeping.
 var input_tick := 0            # monotonically increasing sequence number
+
 var pending: Array = []        # inputs sent but not yet acknowledged by the server
 
+
 @onready var players_root: Node2D = $Players
+
 @onready var player_spawner: MultiplayerSpawner = $PlayerSpawner
+
 @onready var item_spawner: MultiplayerSpawner = $ItemSpawner
+
 @onready var projectile_spawner: MultiplayerSpawner = $ProjectileSpawner
+
 @onready var shots_root: Node2D = $Projectiles
+
 @onready var maze: Maze = $Maze
+
 @onready var items_root: Node2D = $Collectibles
+
 
 # --- the simulation ----------------------------------------------------------
 
@@ -184,6 +243,7 @@ static func simulate(maze: Maze, pos: Vector2, dir: Vector2, delta: float) -> Ve
 		out = try_y
 	return out.clamp(HALF, ARENA - HALF)
 
+
 func _setup_spawners() -> void:
 	player_spawner.spawn_function = _build_player
 	player_spawner.spawned.connect(_on_player_spawned)
@@ -198,6 +258,7 @@ func _setup_spawners() -> void:
 	projectile_spawner.spawned.connect(_on_shot_spawned)
 	projectile_spawner.despawned.connect(_on_shot_despawned)
 
+
 # --- spawn functions: run on every peer, building the node from the same data --
 
 func _build_player(data: Dictionary) -> Node:
@@ -207,6 +268,7 @@ func _build_player(data: Dictionary) -> Node:
 	p.net_position = data["pos"]
 	p.target_position = data["pos"]
 	return p
+
 
 # --- registry upkeep, driven by the spawners rather than by hand --------------
 
@@ -226,20 +288,25 @@ func _on_player_spawned(node: Node) -> void:
 		game.play_join()
 	elif is_local() and id == multiplayer.get_unique_id():
 		_arm_join_chime()          # our own arrival: start listening afterwards
-	game.refresh_scores(self)
+	refresh_hud()
 	print("[%d] spawned %d at %s" % [multiplayer.get_unique_id(), id, node.position])
+
 
 func _on_item_spawned(node: Node) -> void:
 	items[node.item_id] = node
 
+
 func _on_item_despawned(node: Node) -> void:
 	items.erase(node.item_id)
+
 
 func _on_shot_spawned(node: Node) -> void:
 	shots[node.shot_id] = node
 
+
 func _on_shot_despawned(node: Node) -> void:
 	shots.erase(node.shot_id)
+
 
 func _on_player_despawned(node: Node) -> void:
 	var id: int = node.peer_id
@@ -248,8 +315,9 @@ func _on_player_despawned(node: Node) -> void:
 	players.erase(id)
 	scores.erase(id)
 	rounds_won.erase(id)
-	game.refresh_scores(self)
+	refresh_hud()
 	print("[%d] despawned %d" % [multiplayer.get_unique_id(), id])
+
 
 ## What `update_state` used to do, now driven by the synchronizer's own signal.
 func _on_player_synchronized(node: Node) -> void:
@@ -259,6 +327,7 @@ func _on_player_synchronized(node: Node) -> void:
 		_reconcile(node, node.net_position, node.last_tick)
 	else:
 		node.target_position = node.net_position
+
 
 func _physics_process(delta: float) -> void:
 	if game == null or not game.in_session:
@@ -273,6 +342,7 @@ func _physics_process(delta: float) -> void:
 	if is_local() and not game.is_dedicated:
 		_send_input(delta)
 
+
 func _send_input(delta: float) -> void:
 	var dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	if dir.length() > 0.001:
@@ -280,7 +350,7 @@ func _send_input(delta: float) -> void:
 	for kind in Weapon.Kind.values():
 		if Input.is_action_just_pressed(Weapon.action(kind)):
 			selected_weapon = kind
-			game.refresh_weapon_label(self)
+			refresh_hud()
 			break
 	if Input.is_action_just_pressed("fire"):
 		request_fire.rpc_id(1, selected_weapon)
@@ -301,6 +371,7 @@ func _send_input(delta: float) -> void:
 	p.position = simulate(maze, p.position, moved, delta)
 	p.target_position = p.position
 	pending.append({"tick": input_tick, "dir": moved, "delta": delta})
+
 
 func _server_simulate(delta: float) -> void:
 	for id in players:
@@ -329,6 +400,7 @@ func _server_simulate(delta: float) -> void:
 	_check_pickup()
 	_top_up_items()
 
+
 ## Server only: count down a player's freeze and its weapon cooldowns.
 func _tick_timers(p: Node2D, delta: float) -> void:
 	if p.frozen_remaining > 0.0:
@@ -340,6 +412,7 @@ func _tick_timers(p: Node2D, delta: float) -> void:
 		else:
 			p.cooldowns[kind] = left
 
+
 ## Server only: fly every shot and resolve whatever it ran into. Clients do the
 ## flying half of this in `Projectile._process`; only here does it mean anything.
 func _advance_shots(delta: float) -> void:
@@ -350,6 +423,7 @@ func _advance_shots(delta: float) -> void:
 			continue
 		if _resolve_shot_hit(shot):
 			server_remove_shot(sid)
+
 
 ## True when the shot is spent on whatever it touched.
 func _resolve_shot_hit(shot: Projectile) -> bool:
@@ -374,6 +448,7 @@ func _resolve_shot_hit(shot: Projectile) -> bool:
 			# No effect on this target -- carry on, so the shot can still reach
 			# somebody behind them.
 	return false
+
 
 ## True when the shot actually did something to `pid` and is spent.
 func _apply_to_player(shot: Projectile, pid: int) -> bool:
@@ -400,6 +475,7 @@ func _apply_to_player(shot: Projectile, pid: int) -> bool:
 		return true
 	return false
 
+
 ## Server only. Shared by walking into a gem and by shooting one.
 func _award_item(pid: int, iid: int) -> void:
 	if not players.has(pid) or not items.has(iid):
@@ -410,6 +486,7 @@ func _award_item(pid: int, iid: int) -> void:
 	# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
 	if after >= WIN_SCORE:
 		_finish_round(pid)
+
 
 func _check_pickup() -> void:
 	var reach := Collectible.RADIUS + HALF.x
@@ -425,6 +502,7 @@ func _check_pickup() -> void:
 				return                     # the new round replaced every item
 			break                          # this player has had their pickup this tick
 
+
 ## Server only: retire anything that has outlived its lifespan.
 func _expire_items(delta: float) -> void:
 	for iid in items.keys():
@@ -432,6 +510,7 @@ func _expire_items(delta: float) -> void:
 		item.age += delta                  # the server ages them too; it does not _process
 		if item.age >= item.lifetime:
 			server_remove_item(iid, 0, 0)  # peer 0 == nobody collected it
+
 
 ## Server only: keep between MIN_ITEMS and MAX_ITEMS lying around.
 func _top_up_items() -> void:
@@ -442,6 +521,7 @@ func _top_up_items() -> void:
 		if not _spawn_item():
 			return
 
+
 func _spawn_item() -> bool:
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
@@ -451,6 +531,7 @@ func _spawn_item() -> bool:
 	server_add_item(Collectible.random_kind(rng), pos,
 		rng.randf_range(LIFETIME_MIN, LIFETIME_MAX))
 	return true
+
 
 ## An open cell that no other collectible is already sitting in.
 func _free_item_point(rng: RandomNumberGenerator) -> Vector2:
@@ -466,6 +547,7 @@ func _free_item_point(rng: RandomNumberGenerator) -> Vector2:
 		if clear:
 			return p
 	return maze.random_open_point(rng)
+
 
 # --- server-side entry points -------------------------------------------------
 #
@@ -484,12 +566,14 @@ func server_add_player(id: int, pos: Vector2) -> void:
 	if node != null:
 		_on_player_spawned(node)
 
+
 func server_remove_player(id: int) -> void:
 	if not players.has(id):
 		return
 	var node: Node = players[id]
 	_on_player_despawned(node)      # same asymmetry as spawning
 	node.queue_free()               # the spawner replicates the despawn
+
 
 func server_add_item(kind: int, pos: Vector2, lifetime: float) -> int:
 	var iid := _next_item_id
@@ -502,6 +586,7 @@ func server_add_item(kind: int, pos: Vector2, lifetime: float) -> int:
 	items_root.add_child(c, true)   # the spawner notices and replicates
 	items[iid] = c                  # `spawned` is remote-only, so register ours
 	return iid
+
 
 ## Server only: put a shot in the air. Returns its id, or 0 if the weapon was
 ## not ready -- too soon since the last shot, or not enough points to pay for it.
@@ -532,12 +617,14 @@ func server_fire(shooter: int, kind: int) -> int:
 	shots[sid] = shot              # `spawned` is remote-only, so register ours
 	return sid
 
+
 func server_remove_shot(sid: int) -> void:
 	if not shots.has(sid):
 		return
 	var node: Node = shots[sid]
 	shots.erase(sid)
 	node.queue_free()              # the spawner replicates the despawn
+
 
 ## `collector` is 0 when the item simply timed out. The despawn itself rides on
 ## the spawner; only the score and the sound need saying out loud.
@@ -552,6 +639,7 @@ func server_remove_item(iid: int, collector: int, new_score: int) -> void:
 	items.erase(iid)                # same asymmetry: despawned is remote-only
 	_desired_items = randi_range(MIN_ITEMS, MAX_ITEMS)
 	node.queue_free()
+
 
 # --- rpcs --------------------------------------------------------------------
 
@@ -569,6 +657,7 @@ func request_fire(kind: int) -> void:
 		return                     # never trust an any_peer argument
 	server_fire(id, kind)
 
+
 ## The freeze itself replicates through the synchronizer; this is the event, so
 ## the victim gets an immediate local reaction rather than waiting for the next
 ## 20 Hz sync to notice it has stopped moving.
@@ -578,15 +667,17 @@ func request_fire(kind: int) -> void:
 func scores_changed(changed: Dictionary) -> void:
 	for pid in changed:
 		scores[pid] = int(changed[pid])
-	game.refresh_scores(self)
+	refresh_hud()
+
 
 @rpc("authority", "call_local", "reliable")
 func points_stolen(thief: int, victim: int, amount: int) -> void:
 	if thief == multiplayer.get_unique_id():
-		game.announce_for(self, "Lifted %d point%s from %s" % [
+		say("Lifted %d point%s from %s" % [
 			amount, "" if amount == 1 else "s", game.label_for(victim)])
 	elif victim == multiplayer.get_unique_id():
-		game.announce_for(self, "%s picked your pocket (-%d)" % [game.label_for(thief), amount])
+		say("%s picked your pocket (-%d)" % [game.label_for(thief), amount])
+
 
 @rpc("authority", "call_local", "reliable")
 func player_frozen(pid: int, seconds: float) -> void:
@@ -594,15 +685,17 @@ func player_frozen(pid: int, seconds: float) -> void:
 		players[pid].frozen_remaining = seconds
 	if pid == multiplayer.get_unique_id():
 		pending.clear()            # predictions made while moving are void now
-		game.announce_for(self, "Frozen for %.0f seconds" % seconds)
+		say("Frozen for %.0f seconds" % seconds)
+
 
 @rpc("authority", "call_local", "reliable")
 func item_collected(collector: int, new_score: int, kind: int) -> void:
 	scores[collector] = new_score
 	if collector == multiplayer.get_unique_id() and not game.is_dedicated:
-		game.play_pickup(kind)
-	game.refresh_scores(self)
+		play_pickup(kind)
+	refresh_hud()
 	print("[%d] %d picked up, now on %d" % [multiplayer.get_unique_id(), collector, new_score])
+
 
 @rpc("any_peer", "call_local", "unreliable_ordered")
 func submit_input(tick: int, dir: Vector2) -> void:
@@ -612,6 +705,7 @@ func submit_input(tick: int, dir: Vector2) -> void:
 	if id == 0:
 		id = 1                                  # host called it on itself
 	submit_input_for(id, tick, dir)
+
 
 ## The validation, separated from "who sent it". Everything here treats its
 ## arguments as hostile, because `submit_input` is reachable by anyone.
@@ -625,6 +719,7 @@ func submit_input_for(id: int, tick: int, dir: Vector2) -> void:
 	if p.input_queue.size() >= INPUT_QUEUE_CAP:
 		p.input_queue.pop_front()               # flooding client: drop the oldest
 	p.input_queue.append({"tick": tick, "dir": dir.limit_length(1.0)})   # never trust the magnitude
+
 
 ## Everyone regenerates the identical grid from `seed_value`; only the seed travels.
 ## Players are repositioned because the new layout may have dropped a wall on them.
@@ -643,9 +738,9 @@ func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: D
 	for id in scores:
 		scores[id] = 0                 # a new maze is a new round
 	if winner != 0:
-		game.show_round_overlay(self, "%s wins round %d\n%d of %d" % [
+		banner("%s wins round %d\n%d of %d" % [
 			game.label_for(winner), round_no - 1, int(rounds_won.get(winner, 0)), GAME_WINS])
-	game.refresh_scores(self)
+	refresh_hud()
 	for id in placements:
 		if not players.has(id):
 			continue
@@ -656,6 +751,7 @@ func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: D
 	pending.clear()   # predictions made against the old walls mean nothing now
 	print("[%d] maze regenerated, seed %d" % [multiplayer.get_unique_id(), seed_value])
 
+
 ## One finished round. Sent as it happens, and replayed one-at-a-time to late
 ## joiners, so the history is never shipped as a single oversized payload.
 @rpc("authority", "call_local", "reliable")
@@ -665,12 +761,14 @@ func record_round(round_no: int, winner: int, final_scores: Dictionary) -> void:
 			return                     # idempotent
 	round_history.append({"round": round_no, "winner": winner, "scores": final_scores})
 
+
 @rpc("authority", "call_local", "reliable")
 func game_over(winner: int, standings: Dictionary, round_no: int) -> void:
 	game_finished = true
 	rounds_won = standings.duplicate()
 	round_index = round_no
 	game.show_game_over(self, winner)
+
 
 ## Anyone at the results screen may start the next game.
 @rpc("any_peer", "call_local", "reliable")
@@ -686,6 +784,7 @@ func request_restart() -> void:
 	restart_game.rpc()
 	_new_maze(0)
 
+
 @rpc("authority", "call_local", "reliable")
 func restart_game() -> void:
 	game_finished = false
@@ -693,7 +792,8 @@ func restart_game() -> void:
 	round_index = 1
 	for id in rounds_won:
 		rounds_won[id] = 0
-	game.refresh_scores(self)
+	refresh_hud()
+
 
 ## Shared state a late joiner cannot infer from the spawn RPCs.
 @rpc("authority", "reliable")
@@ -707,7 +807,8 @@ func sync_world(seed_value: int, all_scores: Dictionary, standings: Dictionary,
 	# Deliberately does NOT clear items: the spawner has already replayed every
 	# live one to us, and wiping them here is exactly how they went missing.
 	round_history.clear()
-	game.refresh_scores(self)
+	refresh_hud()
+
 
 # --- reconciliation ----------------------------------------------------------
 
@@ -725,12 +826,14 @@ func _reconcile(p: Node2D, authoritative: Vector2, acked_tick: int) -> void:
 	p.position = pos
 	p.target_position = pos
 
+
 # --- helpers -----------------------------------------------------------------
 
 func _apply_maze(seed_value: int) -> void:
 	maze_seed = seed_value
 	maze.generate(seed_value, ARENA)
 	maze.queue_redraw()
+
 
 ## Server only: bank the round, then either end the game or deal a new maze.
 func _finish_round(winner: int) -> void:
@@ -742,6 +845,7 @@ func _finish_round(winner: int) -> void:
 	else:
 		_new_maze(winner)
 
+
 ## Server only: start a round. `winner` is 0 for the very first one.
 func _new_maze(winner: int = 0) -> void:
 	var seed_value := randi()
@@ -751,6 +855,7 @@ func _new_maze(winner: int = 0) -> void:
 		placements[id] = _open_spawn()
 	set_maze.rpc(seed_value, placements, winner, rounds_won, round_index)
 
+
 ## Server only: the spawner replicates each despawn.
 func _clear_shots() -> void:
 	for sid in shots.keys():
@@ -758,12 +863,15 @@ func _clear_shots() -> void:
 			shots[sid].queue_free()
 	shots.clear()
 
+
 func _clear_items() -> void:
 	for iid in items.keys():
 		items[iid].queue_free()
 	items.clear()
 
+
 func _open_spawn() -> Vector2:
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	return maze.random_open_point(rng)
+

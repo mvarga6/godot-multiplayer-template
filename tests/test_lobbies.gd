@@ -18,8 +18,12 @@ func after_each() -> void:
 func _make_lobby(wanted: String, members: Array) -> int:
 	var id: int = main._next_lobby_id
 	main._next_lobby_id += 1
-	main.lobbies[id] = {"name": main._clean_lobby_name(wanted, id), "members": []}
-	main._create_world(id)
+	main.lobbies[id] = {
+		"name": main._clean_lobby_name(wanted, id),
+		"type": GameType.DEFAULT,
+		"members": [],
+	}
+	main._create_world(id, GameType.DEFAULT)
 	for m in members:
 		main._server_move_peer(m, id)
 	return id
@@ -33,7 +37,7 @@ func test_a_fresh_server_has_no_games() -> void:
 
 func test_creating_a_lobby_names_it_and_puts_you_in_it() -> void:
 	# The real client path: ask the server, end up inside what you asked for.
-	main.request_create_lobby("Mike's game")
+	main.request_create_lobby("Mike's game", GameType.DEFAULT)
 	eq(main.lobbies.size(), 1, "one lobby now exists")
 	var id: int = main.lobbies.keys()[0]
 	ok(id > 0, "a lobby was created")
@@ -127,17 +131,88 @@ func test_the_last_player_leaving_takes_the_lobby_with_them() -> void:
 	not_ok(main.lobbies.has(id), "an empty lobby is pruned")
 	not_ok(main.worlds.has(id), "and its world with it")
 
+# --- game types ---------------------------------------------------------------
+
+func test_the_catalogue_is_well_formed() -> void:
+	ok(GameType.ids().size() > 0, "the server hosts at least one game")
+	for id in GameType.ids():
+		ok(GameType.known(id), "%s is known" % id)
+		ne(GameType.name_of(id), "", "%s has a display name" % id)
+		ne(GameType.blurb(id), "", "%s has a description" % id)
+		ok(ResourceLoader.exists(GameType.scene_path(id)),
+			"%s points at a scene that exists" % id)
+
+func test_our_game_is_called_a_mazing() -> void:
+	eq(GameType.name_of("amazing"), "A Mazing", "the maze game has a name")
+	eq(GameType.DEFAULT, "amazing", "and is what you get by default")
+
+func test_an_unknown_type_falls_back_rather_than_failing() -> void:
+	not_ok(GameType.known("tetris"), "we do not host that")
+	eq(GameType.resolve("tetris"), GameType.DEFAULT, "so you get the default instead")
+	eq(GameType.resolve(""), GameType.DEFAULT, "same for a blank type")
+
+func test_a_lobby_remembers_its_type() -> void:
+	var id := _make_lobby("game", [1])
+	eq(main.lobbies[id]["type"], GameType.DEFAULT, "the type is stored with the lobby")
+
+func test_creating_with_a_bogus_type_still_works() -> void:
+	main.request_create_lobby("hopeful", "pinball")
+	var id: int = main.lobbies.keys()[0]
+	eq(main.lobbies[id]["type"], GameType.DEFAULT, "coerced to something we can host")
+	ok(main.worlds.has(id), "and it still got a world")
+
+func test_the_browser_shows_the_type_beside_the_name() -> void:
+	var id := _make_lobby("Mike's game", [1])
+	var digest: Array = main._lobby_digest()
+	eq(digest.size(), 1, "one lobby listed")
+	eq(digest[0]["name"], "Mike's game", "with its name")
+	eq(digest[0]["type"], "A Mazing", "and the game type spelled out")
+
+func test_the_world_spawned_matches_the_type() -> void:
+	var id := _make_lobby("game", [1])
+	var w = main.worlds[id]
+	eq(w.get_scene_file_path(), GameType.scene_path(GameType.DEFAULT),
+		"the lobby's type chose the scene")
+
+func test_main_does_not_reach_into_the_game() -> void:
+	# The contract is what lets a second game type exist: Main admits a player
+	# and the World decides what that means.
+	var id := _make_lobby("game", [])
+	var w = main.worlds[id]
+	for required in ["server_prepare", "server_admit", "server_evict",
+			"refresh_visibility", "is_local", "gate"]:
+		ok(w.has_method(required), "World provides %s()" % required)
+
+func test_a_second_type_needs_nothing_but_a_row() -> void:
+	# The honest test of an abstraction: register another game and check that
+	# creation, the digest and the spawned scene all follow it, with no change
+	# anywhere else. It reuses the same scene because there is only one game so
+	# far -- what is being proved is that the *registry* drives everything.
+	GameType.register("duel", "Maze Duel", "Same maze, fewer friends.",
+		GameType.scene_path(GameType.DEFAULT))
+	ok(GameType.known("duel"), "the new type is known")
+	eq(GameType.name_of("duel"), "Maze Duel", "by its own name")
+
+	main.request_create_lobby("grudge match", "duel")
+	var id: int = main.lobbies.keys()[0]
+	eq(main.lobbies[id]["type"], "duel", "the lobby took the type asked for")
+	ok(main.worlds.has(id), "and got a world for it")
+	var digest: Array = main._lobby_digest()
+	eq(digest[0]["type"], "Maze Duel", "the browser shows the new type by name")
+
+	GameType.TYPES.erase("duel")
+
 # --- the join chime -----------------------------------------------------------
 
 func test_your_own_arrival_is_not_announced_to_you() -> void:
 	var id := _create(1, "game")
-	var w: World = main.worlds[id]
+	var w: GameWorld = main.worlds[id]
 	w._announce_joins = true          # even once armed
 	not_ok(w.should_announce_join(1), "you do not chime at yourself")
 
 func test_arrivals_are_announced_once_you_have_settled() -> void:
 	var id := _create(1, "game")
-	var w: World = main.worlds[id]
+	var w: GameWorld = main.worlds[id]
 	w._announce_joins = false
 	not_ok(w.should_announce_join(7), "silent while your own arrival settles")
 	w._announce_joins = true
@@ -147,17 +222,17 @@ func test_another_lobbys_arrivals_are_silent() -> void:
 	var mine := _make_lobby("mine", [1])
 	var theirs := _make_lobby("theirs", [2])
 	main.my_lobby_id = mine
-	var other: World = main.worlds[theirs]
+	var other: GameWorld = main.worlds[theirs]
 	other._announce_joins = true
 	not_ok(other.should_announce_join(9),
 		"somebody joining a different game is not your business")
-	var own: World = main.worlds[mine]
+	var own: GameWorld = main.worlds[mine]
 	own._announce_joins = true
 	ok(own.should_announce_join(9), "but your own game is")
 
 func test_a_dedicated_server_never_chimes() -> void:
 	var id := _create(1, "game")
-	var w: World = main.worlds[id]
+	var w: GameWorld = main.worlds[id]
 	w._announce_joins = true
 	main.is_dedicated = true
 	not_ok(w.should_announce_join(7), "a VPS has nobody to play it to")

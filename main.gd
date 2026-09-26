@@ -8,7 +8,6 @@ extends Node2D
 ## because a World (and everything inside it) is only visible to peers that are
 ## members of that lobby.
 
-const WORLD_SCENE := preload("res://world.tscn")
 
 const DEFAULT_PORT := 9000
 const MAX_PLAYERS := 8
@@ -31,9 +30,8 @@ var in_session := false
 var _announce_until := 0.0
 var port := DEFAULT_PORT       # overridden by `-- --port N`
 
-var _sfx: Dictionary = {}
 var _join_sfx: AudioStreamPlayer = null
-var join_chimes := 0           # how many arrivals we have announced; handy under test      # Collectible.Kind -> AudioStreamPlayer
+var join_chimes := 0           # how many arrivals we have announced; handy under test
 
 ## Nothing may join until it has proved it speaks the same protocol. Doing this
 ## through `auth_callback` rather than a hello RPC matters: `peer_connected`
@@ -137,32 +135,21 @@ func _setup_audio() -> void:
 	music.play()
 	# One player per kind, so two different pickups in quick succession do not
 	# cut each other off.
-	for kind in Collectible.SOUND:
-		var p := AudioStreamPlayer.new()
-		p.stream = Collectible.SOUND[kind]
-		p.bus = "Master"
-		p.volume_db = -4.0
-		add_child(p)
-		_sfx[kind] = p
 	_join_sfx = AudioStreamPlayer.new()
 	_join_sfx.stream = preload("res://audio/player_join.mp3")
 	_join_sfx.volume_db = -6.0
 	add_child(_join_sfx)
 
 ## Deliberately local-only: you hear your own pickups, never anyone else's.
-func _play_pickup(kind: int) -> void:
-	if _sfx.has(kind):
-		_sfx[kind].play()
-
 func _setup_camera() -> void:
 	# The arena is four viewports big now, so the view follows you.
 	camera.limit_left = 0
 	camera.limit_top = 0
-	camera.limit_right = int(World.ARENA.x)
-	camera.limit_bottom = int(World.ARENA.y)
+	camera.limit_right = int(AmazingWorld.ARENA.x)
+	camera.limit_bottom = int(AmazingWorld.ARENA.y)
 	camera.position_smoothing_enabled = true
 	camera.position_smoothing_speed = 8.0
-	camera.position = World.ARENA * 0.5
+	camera.position = AmazingWorld.ARENA * 0.5
 
 ## Two fonts, because order decides whose metrics win. Emoji-first makes Latin
 ## text inherit the emoji font's fixed advance width and come out spaced like
@@ -252,7 +239,7 @@ func _grid_cell(text: String, strong: bool) -> void:
 # it. Clients never mutate it; they ask, and the server broadcasts the result.
 
 var lobbies: Dictionary = {}       # lobby_id:int -> {name:String, members:Array[int]}
-var worlds: Dictionary = {}        # lobby_id:int -> World node
+var worlds: Dictionary = {}        # lobby_id:int -> GameWorld node
 var my_lobby_id: int = 0           # 0 = not in a game yet
 var _next_lobby_id := 1
 var _browser_seen: Array = []    # last digest received, as the browser shows it
@@ -270,17 +257,17 @@ func lobby_members(lobby_id: int) -> Array:
 		return []
 	return lobbies[lobby_id]["members"]
 
-func local_world() -> World:
+func local_world() -> GameWorld:
 	return worlds.get(my_lobby_id)
 
 ## Server only: a World per lobby, spawned into `Worlds`. Its own synchronizer
 ## is gated on membership, so only that lobby's players ever receive it.
-func _create_world(lobby_id: int) -> World:
-	var w: World = WORLD_SCENE.instantiate()
+func _create_world(lobby_id: int, type_id: String) -> GameWorld:
+	var w: GameWorld = GameType.scene(type_id).instantiate()
 	w.name = "world_%d" % lobby_id
 	w.lobby_id = lobby_id
-	w.maze_seed = randi()
 	w.game = self
+	w.server_prepare()          # spawn state must be set before it enters the tree
 	w.gate(w)
 	worlds_root.add_child(w, true)
 	w.refresh_visibility()          # now that it is in the tree and can ask
@@ -297,7 +284,7 @@ func _on_world_despawned(node: Node) -> void:
 # --- lobby RPCs ---------------------------------------------------------------
 
 @rpc("any_peer", "call_local", "reliable")
-func request_create_lobby(wanted: String) -> void:
+func request_create_lobby(wanted: String, type_id: String) -> void:
 	if not multiplayer.is_server():
 		return
 	var peer := multiplayer.get_remote_sender_id()
@@ -305,8 +292,12 @@ func request_create_lobby(wanted: String) -> void:
 		peer = 1
 	var id := _next_lobby_id
 	_next_lobby_id += 1
-	lobbies[id] = {"name": _clean_lobby_name(wanted, id), "members": []}
-	_create_world(id)
+	lobbies[id] = {
+		"name": _clean_lobby_name(wanted, id),
+		"type": GameType.resolve(type_id),
+		"members": [],
+	}
+	_create_world(id, lobbies[id]["type"])
 	_server_move_peer(peer, id)
 
 @rpc("any_peer", "call_local", "reliable")
@@ -339,7 +330,7 @@ func _server_move_peer(peer: int, lobby_id: int) -> void:
 		if members.has(peer):
 			members.erase(peer)
 			if worlds.has(id):
-				worlds[id].server_remove_player(peer)
+				worlds[id].server_evict(peer)
 	if lobby_id != 0 and lobbies.has(lobby_id):
 		(lobbies[lobby_id]["members"] as Array).append(peer)
 	_prune_empty_lobbies()
@@ -377,7 +368,7 @@ func _admit(lobby_id: int, peer: int) -> void:
 		return
 	if worlds[lobby_id].players.has(peer):
 		return                      # already in
-	worlds[lobby_id].server_add_player(peer, worlds[lobby_id]._open_spawn())
+	worlds[lobby_id].server_admit(peer)
 
 func _prune_empty_lobbies() -> void:
 	for id in lobbies.keys():
@@ -408,7 +399,11 @@ func _lobby_digest() -> Array:
 		var who := PackedStringArray()
 		for peer in lobbies[id]["members"]:
 			who.append(str(names.get(peer, "Player %d" % peer)))
-		out.append({"id": id, "name": lobbies[id]["name"], "players": who})
+		var type_id: String = str(lobbies[id].get("type", GameType.DEFAULT))
+		out.append({
+			"id": id, "name": lobbies[id]["name"],
+			"type": GameType.name_of(type_id), "players": who,
+		})
 	return out
 
 @rpc("authority", "call_local", "reliable")
@@ -436,9 +431,11 @@ func you_are_in(lobby_id: int) -> void:
 @onready var browser: CanvasLayer = $Browser
 @onready var browser_list: VBoxContainer = $Browser/Root/Box/Scroll/List
 @onready var lobby_name_field: LineEdit = $Browser/Root/Box/New/LobbyName
+@onready var type_picker: OptionButton = $Browser/Root/Box/New/TypePicker
 @onready var hud: CanvasLayer = $Hud
 @onready var score_label: Label = $Hud/ScoreLabel
-@onready var weapon_label: Label = $Hud/WeaponLabel
+## Second HUD line. The game decides what goes in it.
+@onready var status_line: Label = $Hud/StatusLabel
 @onready var announce_label: Label = $Hud/AnnounceLabel
 @onready var round_overlay: CanvasLayer = $RoundOverlay
 @onready var round_overlay_root: Control = $RoundOverlay/Root
@@ -452,11 +449,14 @@ func you_are_in(lobby_id: int) -> void:
 func _ready() -> void:
 	get_tree().auto_accept_quit = false
 	_setup_auth()
-	_setup_input()
 	_setup_audio()
 	_setup_camera()
 	_setup_icon_picker()
-	world_spawner.add_spawnable_scene(WORLD_SCENE.resource_path)
+	_setup_type_picker()
+	# Every type's scene has to be spawnable, or a lobby of that type cannot
+	# replicate to its members.
+	for type_id in GameType.ids():
+		world_spawner.add_spawnable_scene(GameType.scene_path(type_id))
 	world_spawner.spawned.connect(_on_world_spawned)
 	world_spawner.despawned.connect(_on_world_despawned)
 	_connect_multiplayer_signals()
@@ -466,11 +466,6 @@ func _ready() -> void:
 	_show_connect()
 	if is_dedicated:
 		_start_dedicated_server()
-
-func _setup_input() -> void:
-	_bind_key("fire", KEY_SPACE)
-	for kind in Weapon.Kind.values():
-		_bind_key(Weapon.action(kind), Weapon.key(kind))
 
 func _setup_icon_picker() -> void:
 	icon_picker.add_theme_font_override("font", _emoji_font(false))
@@ -503,7 +498,9 @@ func _show_playing() -> void:
 	connect_layer.visible = false
 	browser.visible = false
 	hud.visible = true
-	refresh_weapon_label(local_world())
+	var w := local_world()
+	if w != null and w.has_method("refresh_hud"):
+		w.refresh_hud()
 
 # --- the browser --------------------------------------------------------------
 
@@ -526,12 +523,17 @@ func _lobby_row(entry: Dictionary) -> Control:
 	var title := Label.new()
 	title.add_theme_font_override("font", _emoji_font(true))
 	title.text = "%s  (%d)" % [entry["name"], who.size()]
-	title.custom_minimum_size.x = 240.0
+	title.custom_minimum_size.x = 220.0
 	row.add_child(title)
+	var kind := Label.new()
+	kind.text = str(entry.get("type", ""))
+	kind.custom_minimum_size.x = 130.0
+	kind.add_theme_color_override("font_color", Color(0.75, 0.80, 1.0))
+	row.add_child(kind)
 	var roster := Label.new()
 	roster.add_theme_font_override("font", _emoji_font(true))
 	roster.text = ", ".join(who) if who.size() > 0 else "empty"
-	roster.custom_minimum_size.x = 420.0
+	roster.custom_minimum_size.x = 330.0
 	row.add_child(roster)
 	var join := Button.new()
 	join.text = "Join"
@@ -540,7 +542,20 @@ func _lobby_row(entry: Dictionary) -> Control:
 	return row
 
 func _on_create_lobby_pressed() -> void:
-	request_create_lobby.rpc_id(1, lobby_name_field.text)
+	request_create_lobby.rpc_id(1, lobby_name_field.text, _selected_type())
+
+func _selected_type() -> String:
+	var ids: Array = GameType.ids()
+	var i: int = type_picker.selected
+	return str(ids[i]) if i >= 0 and i < ids.size() else GameType.DEFAULT
+
+func _setup_type_picker() -> void:
+	type_picker.clear()
+	for i in GameType.ids().size():
+		var id: String = str(GameType.ids()[i])
+		type_picker.add_item(GameType.name_of(id), i)
+		type_picker.set_item_tooltip(i, GameType.blurb(id))
+	type_picker.selected = 0
 
 func _on_leave_lobby_pressed() -> void:
 	request_leave_lobby.rpc_id(1)
@@ -554,49 +569,32 @@ func _on_leave_lobby_pressed() -> void:
 func label_for(id: int) -> String:
 	return "%s %s" % [ICONS[int(icons.get(id, 0))], str(names.get(id, "Player %d" % id))]
 
-func play_pickup(kind: int) -> void:
-	if _sfx.has(kind):
-		_sfx[kind].play()
-
 ## Somebody walked into the game you are already playing.
 func play_join() -> void:
 	join_chimes += 1
 	if _join_sfx != null:
 		_join_sfx.play()
 
-func refresh_scores(world: World) -> void:
+## The two HUD lines are just text. A game composes its own; the shell only
+## decides whether this game is the one on screen.
+func set_score_line(world: GameWorld, text: String) -> void:
 	if is_dedicated or world == null or not world.is_local():
 		return
-	var ids: Array = world.scores.keys()
-	ids.sort()
-	var parts := PackedStringArray()
-	for id in ids:
-		parts.append("%s %d/%d  wins %d" % [
-			label_for(id), int(world.scores[id]), world.WIN_SCORE,
-			int(world.rounds_won.get(id, 0))])
-	score_label.text = "    ".join(parts)
+	score_label.text = text
 
-func refresh_weapon_label(world: World) -> void:
+func set_status_line(world: GameWorld, text: String) -> void:
 	if is_dedicated or world == null or not world.is_local():
 		return
-	var parts := PackedStringArray()
-	for kind in Weapon.Kind.values():
-		var key := Weapon.key_label(kind)
-		var mark := "[%s]" % key if kind == world.selected_weapon else " %s " % key
-		var price := Weapon.cost(kind)
-		parts.append("%s %s %s%s" % [
-			mark, Weapon.glyph(kind), Weapon.label(kind),
-			"" if price == 0 else " (%d)" % price])
-	weapon_label.text = "  ".join(parts) + "   SPACE to fire"
+	status_line.text = text
 
-func announce_for(world: World, msg: String) -> void:
+func announce_for(world: GameWorld, msg: String) -> void:
 	print(msg)
 	if is_dedicated or world == null or not world.is_local():
 		return
 	announce_label.text = msg
 	_announce_until = Time.get_unix_time_from_system() + ANNOUNCE_SECONDS
 
-func show_round_overlay(world: World, text: String) -> void:
+func show_round_overlay(world: GameWorld, text: String) -> void:
 	announce_for(world, text.replace("\n", "  "))
 	if is_dedicated or world == null or not world.is_local():
 		return
@@ -613,34 +611,26 @@ func show_round_overlay(world: World, text: String) -> void:
 	tw.tween_property(round_overlay_root, "modulate:a", 0.0, 0.3)
 	tw.tween_callback(func() -> void: round_overlay.visible = false)
 
-func show_game_over(world: World, winner: int) -> void:
+func show_game_over(world: GameWorld, winner: int) -> void:
 	print("GAME OVER: %s takes it" % label_for(winner))
 	if is_dedicated or world == null or not world.is_local():
 		return
 	round_overlay.visible = false
 	game_over_title.text = "%s wins the game" % label_for(winner)
-	_fill_stats_grid(world)
+	_fill_stats_grid(world.results_table())
 	hud.visible = false
 	game_over_layer.visible = true
 
-func _fill_stats_grid(world: World) -> void:
+func _fill_stats_grid(table: Array) -> void:
 	for child in game_over_stats.get_children():
 		child.queue_free()
-	var ids: Array = world.rounds_won.keys()
-	ids.sort()
-	game_over_stats.columns = ids.size() + 1
-	_grid_cell("round", true)
-	for id in ids:
-		_grid_cell(label_for(id), true)
-	for entry in world.round_history:
-		_grid_cell(str(int(entry["round"])), false)
-		var round_scores: Dictionary = entry["scores"]
-		for id in ids:
-			var won: bool = int(entry["winner"]) == id
-			_grid_cell("%d%s" % [int(round_scores.get(id, 0)), "  ★" if won else ""], won)
-	_grid_cell("rounds won", true)
-	for id in ids:
-		_grid_cell(str(int(world.rounds_won.get(id, 0))), true)
+	if table.is_empty():
+		return
+	game_over_stats.columns = (table[0] as Array).size()
+	for r in table.size():
+		var row: Array = table[r]
+		for cell in row:
+			_grid_cell(str(cell["text"]), bool(cell.get("strong", false)))
 
 func _on_play_again_pressed() -> void:
 	var w := local_world()
@@ -769,7 +759,9 @@ func apply_identity(id: int, index: int, display: String) -> void:
 	icons[id] = index
 	names[id] = display
 	for lid in worlds:
-		var w: World = worlds[lid]
+		var w: GameWorld = worlds[lid]
 		if w.players.has(id):
 			w.players[id].set_identity(ICONS[index], display)
-	refresh_scores(local_world())
+	var lw := local_world()
+	if lw != null and lw.has_method("refresh_hud"):
+		lw.refresh_hud()

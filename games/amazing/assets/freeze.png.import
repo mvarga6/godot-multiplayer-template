@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bhga31ylt12sd"
-path="res://.godot/imported/freeze.png-b4748980b558d211c5bfb7aad61121e7.ctex"
+uid="uid://d32jt7cf6mus6"
+path="res://.godot/imported/freeze.png-3981c75cc4a60f1febedcc204c362c3f.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/freeze.png"
-dest_files=["res://.godot/imported/freeze.png-b4748980b558d211c5bfb7aad61121e7.ctex"]
+source_file="res://games/amazing/assets/freeze.png"
+dest_files=["res://.godot/imported/freeze.png-3981c75cc4a60f1febedcc204c362c3f.ctex"]
 
 [params]
 

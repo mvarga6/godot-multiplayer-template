@@ -8,7 +8,7 @@ func after_each() -> void:
 const TICK := 1.0 / 60.0
 const ARENA := Vector2(2304, 1296)
 
-const Main = preload("res://world.gd")
+const Main = preload("res://games/amazing/amazing_world.gd")
 
 func before_each() -> void:
 	# An empty grid means "no walls", which isolates the movement rule from the maze.
