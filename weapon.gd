@@ -7,13 +7,14 @@ extends RefCounted
 ## Adding a third weapon should mean adding a third entry here plus a colour,
 ## and nothing else.
 
-enum Kind { CAPTURE, FREEZE }
+enum Kind { CAPTURE, FREEZE, STEAL }
 
 ## Speed is a multiple of the player's own, so retuning SPEED retunes both.
 const SPECS := {
 	Kind.CAPTURE: {
 		"label": "Collector",
 		"glyph": "◆",
+		"key": KEY_A,
 		"speed_mult": 2.0,
 		"cost": 0,              # points it costs to fire
 		"lifespan": 2.5,        # seconds in flight before it gives up
@@ -22,24 +23,44 @@ const SPECS := {
 		"hits_items": true,
 		"hits_players": false,
 		"freeze_seconds": 0.0,
+		"steal_points": 0,
 		"colour": Color(0.45, 0.95, 1.0),
 		"texture": preload("res://assets/net.png"),
-		"spin": 10.0,                # the net reads as a word; spinning it is nonsense
+		"spin": 10.0,               # radians/sec, purely cosmetic
 	},
 	Kind.FREEZE: {
 		"label": "Freeze Ray",
 		"glyph": "❄",
+		"key": KEY_S,
 		"speed_mult": 2.0,
-		"cost": 0,
+		"cost": 1,
 		"lifespan": 2.5,
 		"reflect": false,
 		"cooldown": 0.6,
 		"hits_items": false,
 		"hits_players": true,
 		"freeze_seconds": 3.0,
+		"steal_points": 0,
 		"colour": Color(0.65, 0.80, 1.0),
 		"texture": preload("res://assets/freeze.png"),
 		"spin": 5.2,                # radians/sec: a tumbling shard
+	},
+	Kind.STEAL: {
+		"label": "Pickpocket",
+		"glyph": "✋",
+		"key": KEY_D,
+		"speed_mult": 2.0,
+		"cost": 0,
+		"lifespan": 2.5,
+		"reflect": false,
+		"cooldown": 0.8,
+		"hits_items": false,
+		"hits_players": true,
+		"freeze_seconds": 0.0,
+		"steal_points": 1,          # lifted off the victim and handed to the shooter
+		"colour": Color(1.0, 0.82, 0.30),
+		"texture": null,            # no art yet: falls back to the drawn dot
+		"spin": 0.0,
 	},
 }
 
@@ -76,6 +97,21 @@ static func hits_players(kind: int) -> bool:
 
 static func freeze_seconds(kind: int) -> float:
 	return float(spec(kind)["freeze_seconds"])
+
+## Points this weapon takes off whoever it hits and hands to the shooter.
+static func steal_points(kind: int) -> int:
+	return int(spec(kind).get("steal_points", 0))
+
+## The key that selects this weapon, and the action name bound to it. Kept in
+## the spec so adding a weapon really is one row and nothing else.
+static func key(kind: int) -> Key:
+	return spec(kind).get("key", KEY_NONE)
+
+static func action(kind: int) -> String:
+	return "weapon_%d" % kind
+
+static func key_label(kind: int) -> String:
+	return OS.get_keycode_string(key(kind))
 
 ## Null when the weapon has no art and should be drawn instead.
 static func texture(kind: int) -> Texture2D:

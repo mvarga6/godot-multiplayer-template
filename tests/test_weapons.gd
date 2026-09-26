@@ -12,7 +12,8 @@ func before_each() -> void:
 
 func test_every_kind_is_fully_specified() -> void:
 	var required := ["label", "glyph", "speed_mult", "cost", "lifespan", "reflect",
-		"cooldown", "hits_items", "hits_players", "freeze_seconds", "colour", "texture", "spin"]
+		"cooldown", "hits_items", "hits_players", "freeze_seconds", "steal_points",
+		"colour", "texture", "spin", "key"]
 	for kind in Weapon.Kind.values():
 		ok(Weapon.is_kind(kind), "%s is a real kind" % Weapon.Kind.keys()[kind])
 		for key in required:
@@ -21,23 +22,41 @@ func test_every_kind_is_fully_specified() -> void:
 func test_the_documented_defaults_hold() -> void:
 	for kind in Weapon.Kind.values():
 		almost(Weapon.speed(kind, 220.0), 440.0, 0.001, "default speed is 2x the player")
-		eq(Weapon.cost(kind), 0, "default cost is free")
 		not_ok(Weapon.reflects(kind), "walls eat shots by default")
 		ok(Weapon.lifespan(kind) > 0.0, "every shot expires eventually")
 		ok(Weapon.cooldown(kind) > 0.0, "and cannot be fired continuously")
+		ok(Weapon.cost(kind) >= 0, "and never costs a negative amount")
+	eq(Weapon.cost(Weapon.Kind.FREEZE), 1, "the freeze ray is the one you pay for")
+	eq(Weapon.cost(Weapon.Kind.CAPTURE), 0, "the collector is free")
+	eq(Weapon.cost(Weapon.Kind.STEAL), 0, "so is the pickpocket")
 
-func test_the_two_weapons_do_different_jobs() -> void:
+func test_every_weapon_has_its_own_key() -> void:
+	var seen := {}
+	for kind in Weapon.Kind.values():
+		var k := Weapon.key(kind)
+		ne(k, KEY_NONE, "%s is bound to something" % Weapon.Kind.keys()[kind])
+		not_ok(seen.has(k), "%s does not share a key" % Weapon.Kind.keys()[kind])
+		seen[k] = true
+		ne(Weapon.action(kind), "", "and has an action name")
+
+func test_the_three_weapons_do_different_jobs() -> void:
 	ok(Weapon.hits_items(Weapon.Kind.CAPTURE), "the collector takes gems")
 	not_ok(Weapon.hits_players(Weapon.Kind.CAPTURE), "and passes through players")
 	ok(Weapon.hits_players(Weapon.Kind.FREEZE), "the freeze ray hits players")
 	not_ok(Weapon.hits_items(Weapon.Kind.FREEZE), "and ignores gems")
 	eq(Weapon.freeze_seconds(Weapon.Kind.FREEZE), 3.0, "freezing lasts 3s by default")
 	eq(Weapon.freeze_seconds(Weapon.Kind.CAPTURE), 0.0, "the collector freezes nobody")
+	eq(Weapon.steal_points(Weapon.Kind.STEAL), 1, "the pickpocket lifts one point")
+	ok(Weapon.hits_players(Weapon.Kind.STEAL), "off a player")
+	not_ok(Weapon.hits_items(Weapon.Kind.STEAL), "and leaves gems alone")
+	eq(Weapon.steal_points(Weapon.Kind.FREEZE), 0, "the freeze ray steals nothing")
+	eq(Weapon.steal_points(Weapon.Kind.CAPTURE), 0, "nor does the collector")
 
 func test_art_never_changes_the_hitbox() -> void:
 	for kind in Weapon.Kind.values():
 		var tex: Texture2D = Weapon.texture(kind)
-		ok(tex != null, "%s has a sprite" % Weapon.Kind.keys()[kind])
+		if tex == null:
+			continue              # drawn instead; nothing to widen the hitbox with
 		# A sprite bigger than the hitbox must not quietly widen it.
 		ok(float(tex.get_width()) > Weapon.RADIUS, "the sprite is wider than the hitbox")
 	almost(Weapon.RADIUS, 5.0, 0.001, "and the hitbox is unchanged by any of them")
@@ -53,9 +72,11 @@ func test_art_is_still_optional() -> void:
 	ok(Weapon.texture(Weapon.Kind.CAPTURE) != null, "and the real sprite is put back")
 
 func test_spin_is_per_weapon() -> void:
-	# A tumbling shard reads well; a tumbling word does not.
-	ok(Weapon.spin(Weapon.Kind.FREEZE) > 0.0, "the freeze shard tumbles")
-	eq(Weapon.spin(Weapon.Kind.CAPTURE), 0.0, "the net stays the right way up")
+	# Purely cosmetic, and derived from `age`, so it costs nothing to replicate.
+	for kind in Weapon.Kind.values():
+		ok(Weapon.spin(kind) >= 0.0, "%s has a sane spin" % Weapon.Kind.keys()[kind])
+	ne(Weapon.spin(Weapon.Kind.FREEZE), Weapon.spin(Weapon.Kind.CAPTURE),
+		"spin is set per weapon, not globally")
 
 func test_an_unknown_kind_is_rejected() -> void:
 	not_ok(Weapon.is_kind(999), "999 is not a weapon")

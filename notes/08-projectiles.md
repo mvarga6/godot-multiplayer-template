@@ -1,8 +1,9 @@
 # Stage 8 — Projectiles
 
-**Goal:** two weapons. `A` picks the Collector, `S` picks the Freeze Ray, `Space` fires.
-A Collector shot swallows a gem and scores it for whoever fired it. A Freeze Ray shot pins
-another player in place for three seconds. Both are configured from one table.
+**Goal:** three weapons. `A` picks the Collector, `S` the Freeze Ray, `D` the Pickpocket;
+`Space` fires. A Collector shot swallows a gem and scores it for whoever fired it. A Freeze
+Ray pins another player for three seconds. A Pickpocket lifts a point off them. All three are
+configured from one table.
 
 This is the first stage where players can *act on each other*, and it is where the earlier
 rules — "reliable for events, unreliable for state", "the server owns every consequence",
@@ -95,6 +96,22 @@ func effective_dir(wanted: Vector2) -> Vector2:
 `simulate()` stays pure and knows nothing about freezing — the *caller* decides what
 direction to hand it. That keeps reconciliation's replay valid, because the predicted
 direction stored in `pending` is the gated one.
+
+### A status effect must not be refreshable
+Freezing someone who is already frozen does **not** top their timer back up. Without that
+rule, two players can trade shots and keep a third parked forever — a stun-lock, and the
+classic reason status effects need an immunity window.
+
+The shot is not consumed either: an already-frozen player is simply not a valid target, so
+the projectile flies on and can still hit somebody behind them. That is a choice, not a
+law — consuming it instead would make spamming at a frozen player cost you the shot.
+
+### Charging for a shot is a score change like any other
+The moment a weapon costs something, the deduction has to reach every peer. Writing it
+straight into the server's own `scores` dictionary is invisible to clients and desyncs the
+scoreboard — and it stays invisible for as long as every weapon happens to be free, which is
+exactly how it survives review. Costs and steals both go out as a small reliable
+`scores_changed`.
 
 ### One award path, two ways to reach it
 Walking into a gem and shooting one must score identically — same points, same round-win

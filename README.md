@@ -126,17 +126,22 @@ If you add a field to an RPC, measure it: `var_to_bytes([args]).size()`. Anythin
 
 ### Weapons
 
-`A` selects the Collector, `S` the Freeze Ray, `Space` fires. A Collector shot swallows a gem
-and scores it for whoever fired it; a Freeze Ray pins another player for three seconds. Both
-are configured from one table in `weapon.gd`:
+`Space` fires; `A`, `S` and `D` pick the weapon. All three are configured from one table in
+`weapon.gd`:
 
-| | Speed | Cost | Lifespan | Reflect | Cooldown | Effect |
-|---|---|---|---|---|---|---|
-| Collector | 2× player | 0 | 2.5 s | off | 0.35 s | takes gems, ignores players |
-| Freeze Ray | 2× player | 0 | 2.5 s | off | 0.6 s | freezes players 3 s, ignores gems |
+| | Key | Speed | Cost | Lifespan | Reflect | Cooldown | Effect |
+|---|---|---|---|---|---|---|---|
+| Collector | `A` | 2× player | 0 | 2.5 s | off | 0.35 s | takes gems, ignores players |
+| Freeze Ray | `S` | 2× player | **1** | 2.5 s | off | 0.6 s | freezes players 3 s, ignores gems |
+| Pickpocket | `D` | 2× player | 0 | 2.5 s | off | 0.8 s | lifts 1 point off a player |
 
-Speed is a multiple of the player's, so retuning `SPEED` retunes the weapons with it. A third
-weapon should be a third row and nothing else.
+Speed is a multiple of the player's, so retuning `SPEED` retunes all three. The key binding
+lives in the spec too, so adding a weapon really is one row: the Pickpocket needed a row, an
+accessor for `steal_points`, and nothing else.
+
+**You cannot be held frozen.** A freeze shot that hits an already-frozen player has no
+effect and is *not* consumed — it carries on, so it can still reach somebody standing behind
+them. Without that rule two players could keep a third parked indefinitely by taking turns.
 
 Three decisions worth knowing:
 
@@ -147,6 +152,10 @@ Three decisions worth knowing:
   — then every peer integrates the same pure `Projectile.step()` against the same maze. The
   maze-seed trick again: send what determines the motion, not the motion. Clients fly the
   dot; the server alone decides it hit something and frees it.
+- **A priced weapon has to broadcast the charge.** `server_fire` originally deducted the cost
+  straight into its own `scores` dictionary. With every weapon free that was invisible; the
+  moment the Freeze Ray cost 1, the server would have been the only peer that knew. Costs and
+  steals both go through a `scores_changed` RPC now.
 - **`frozen_remaining` is replicated because prediction depends on it.** A client that did
   not know it was frozen would keep predicting movement for three seconds while the server
   refused to move it, and reconciliation would yank it back twenty times a second. Both sides
@@ -372,7 +381,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The sixteen RPCs
+## The eighteen RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
@@ -383,6 +392,8 @@ same node sits at the same path on every peer. That is what makes RPC addressing
 | `sync_world` | `authority, reliable` | Late-join catch-up: seed, scores, standings, icons, live items. Sent *before* the spawns. |
 | `request_fire` | `any_peer, call_local, reliable` | An *event*: a dropped shot is one the player thinks they took. |
 | `player_frozen` | `authority, call_local, reliable` | So the victim reacts now, not at the next 20 Hz sync. |
+| `scores_changed` | `authority, call_local, reliable` | A score moved for a reason other than a pickup: paying for a shot, or being robbed. |
+| `points_stolen` | `authority, call_local, reliable` | The flavour line, shown only to the two players involved. |
 | `request_identity` | `any_peer, call_local, reliable` | A client asks for an emoji and a name; both are validated. |
 | `apply_identity` | `authority, call_local, reliable` | The server is the one that tells everybody. |
 | `record_round` | `authority, call_local, reliable` | One finished round. Every peer keeps its own history. |

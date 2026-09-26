@@ -52,15 +52,15 @@ func test_an_unknown_weapon_cannot_be_fired() -> void:
 func test_a_weapon_with_a_price_charges_for_itself() -> void:
 	_add(7, Vector2(600, 600))
 	# Cost is configurable; prove the mechanism rather than the current default.
-	var spec: Dictionary = Weapon.SPECS[Weapon.Kind.FREEZE]
+	var spec: Dictionary = Weapon.SPECS[Weapon.Kind.CAPTURE]
 	var original: int = spec["cost"]
 	spec["cost"] = 5
 	main.scores[7] = 12
-	ok(main.server_fire(7, Weapon.Kind.FREEZE) > 0, "affordable, so it fires")
+	ok(main.server_fire(7, Weapon.Kind.CAPTURE) > 0, "affordable, so it fires")
 	eq(main.scores[7], 7, "and the points were spent")
 	main.players[7].cooldowns.clear()
 	main.scores[7] = 2
-	eq(main.server_fire(7, Weapon.Kind.FREEZE), 0, "too poor to fire")
+	eq(main.server_fire(7, Weapon.Kind.CAPTURE), 0, "too poor to fire")
 	eq(main.scores[7], 2, "and nothing was taken")
 	spec["cost"] = original
 
@@ -98,6 +98,7 @@ func test_the_freeze_ray_freezes_whoever_it_hits() -> void:
 	var p := _add(7, Vector2(600, 600))
 	p.facing = Vector2.RIGHT
 	var victim := _add(8, Vector2(820, 600))
+	main.scores[7] = 5                 # the freeze ray is not free any more
 	var sid: int = main.server_fire(7, Weapon.Kind.FREEZE)
 	for i in 120:
 		main._advance_shots(TICK)
@@ -114,20 +115,128 @@ func test_the_freeze_ray_ignores_gems() -> void:
 	var p := _add(7, Vector2(600, 600))
 	p.facing = Vector2.RIGHT
 	var iid: int = main.server_add_item(Collectible.Kind.GOLD, Vector2(800, 600), 60.0)
+	main.scores[7] = 5
 	main.server_fire(7, Weapon.Kind.FREEZE)
+	var after_firing: int = main.scores[7]   # already charged for the shot
 	for i in 60:
 		main._advance_shots(TICK)
 	ok(main.items.has(iid), "the gem is still there")
-	eq(int(main.scores.get(7, 0)), 0, "and nobody scored")
+	eq(main.scores[7], after_firing, "and flying past it scored nothing")
 
 func test_you_cannot_freeze_yourself() -> void:
 	main._clear_items()
 	var p := _add(7, Vector2(600, 600))
 	p.facing = Vector2.RIGHT
+	main.scores[7] = 5
 	main.server_fire(7, Weapon.Kind.FREEZE)
 	for i in 30:
 		main._advance_shots(TICK)
 	not_ok(p.is_frozen(), "your own shot passes through you")
+
+func test_the_freeze_ray_costs_a_point_to_fire() -> void:
+	_add(7, Vector2(600, 600))
+	main.scores[7] = 0
+	eq(main.server_fire(7, Weapon.Kind.FREEZE), 0, "broke, so nothing happens")
+	main.scores[7] = 2
+	ok(main.server_fire(7, Weapon.Kind.FREEZE) > 0, "one point buys a shot")
+	eq(main.scores[7], 1, "and it was taken off the shooter")
+
+func test_a_frozen_player_cannot_be_kept_frozen() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	var victim := _add(8, Vector2(820, 600))
+	main.scores[7] = 20
+	# freeze them, let a second tick away, then hit them again
+	main.server_fire(7, Weapon.Kind.FREEZE)
+	for i in 120:
+		main._advance_shots(TICK)
+		if victim.is_frozen():
+			break
+	ok(victim.is_frozen(), "frozen by the first shot")
+	for i in 60:
+		main._tick_timers(victim, TICK)
+	var left_before: float = victim.frozen_remaining
+	ok(left_before < Weapon.freeze_seconds(Weapon.Kind.FREEZE), "the clock is running down")
+	p.cooldowns.clear()
+	main.server_fire(7, Weapon.Kind.FREEZE)
+	for i in 120:
+		main._advance_shots(TICK)
+		if main.shots.is_empty():
+			break
+	almost(victim.frozen_remaining, left_before, 0.001,
+		"a second hit does not top the timer back up")
+
+func test_a_shot_that_cannot_freeze_carries_on_to_the_next_target() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	var already := _add(8, Vector2(760, 600))
+	var behind := _add(9, Vector2(900, 600))
+	already.frozen_remaining = 3.0
+	main.scores[7] = 20
+	main.server_fire(7, Weapon.Kind.FREEZE)
+	for i in 180:
+		main._advance_shots(TICK)
+		if behind.is_frozen():
+			break
+	ok(behind.is_frozen(), "it passed through the frozen player and froze the one behind")
+
+# --- the pickpocket -----------------------------------------------------------
+
+func test_the_pickpocket_moves_a_point_across() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	var victim := _add(8, Vector2(820, 600))
+	main.scores[7] = 3
+	main.scores[8] = 6
+	main.server_fire(7, Weapon.Kind.STEAL)
+	for i in 120:
+		main._advance_shots(TICK)
+		if main.shots.is_empty():
+			break
+	eq(main.scores[8], 5, "one point left the victim")
+	eq(main.scores[7], 4, "and arrived with the thief")
+
+func test_there_is_nothing_to_steal_from_a_player_on_zero() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	var victim := _add(8, Vector2(820, 600))
+	main.scores[7] = 3
+	main.scores[8] = 0
+	main.server_fire(7, Weapon.Kind.STEAL)
+	for i in 120:
+		main._advance_shots(TICK)
+	eq(main.scores[8], 0, "the victim cannot go negative")
+	eq(main.scores[7], 3, "and the thief gains nothing")
+
+func test_stealing_the_last_point_can_win_the_round() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	var victim := _add(8, Vector2(820, 600))
+	main.scores[7] = main.WIN_SCORE - 1
+	main.scores[8] = 4
+	main.server_fire(7, Weapon.Kind.STEAL)
+	for i in 120:
+		main._advance_shots(TICK)
+		if main.rounds_won.get(7, 0) > 0:
+			break
+	eq(main.rounds_won[7], 1, "the stolen point took the round")
+
+func test_the_pickpocket_ignores_gems_and_its_owner() -> void:
+	main._clear_items()
+	var p := _add(7, Vector2(600, 600))
+	p.facing = Vector2.RIGHT
+	main.scores[7] = 4
+	var iid: int = main.server_add_item(Collectible.Kind.GOLD, Vector2(800, 600), 60.0)
+	main.server_fire(7, Weapon.Kind.STEAL)
+	for i in 120:
+		main._advance_shots(TICK)
+	ok(main.items.has(iid), "the gem is untouched")
+	eq(main.scores[7], 4, "and you cannot pick your own pocket")
 
 # --- being frozen -------------------------------------------------------------
 

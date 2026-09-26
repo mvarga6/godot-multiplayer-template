@@ -246,8 +246,8 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 ## Physical keycodes, so this is still A/S/Space on AZERTY.
 func _setup_input() -> void:
 	_bind_key("fire", KEY_SPACE)
-	_bind_key("select_capture", KEY_A)
-	_bind_key("select_freeze", KEY_S)
+	for kind in Weapon.Kind.values():
+		_bind_key(Weapon.action(kind), Weapon.key(kind))
 
 func _bind_key(action: String, key: Key) -> void:
 	if InputMap.has_action(action):
@@ -410,12 +410,11 @@ func _send_input(delta: float) -> void:
 	var dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	if dir.length() > 0.001:
 		local_facing = dir.normalized()
-	if Input.is_action_just_pressed("select_capture"):
-		selected_weapon = Weapon.Kind.CAPTURE
-		_refresh_weapon_label()
-	elif Input.is_action_just_pressed("select_freeze"):
-		selected_weapon = Weapon.Kind.FREEZE
-		_refresh_weapon_label()
+	for kind in Weapon.Kind.values():
+		if Input.is_action_just_pressed(Weapon.action(kind)):
+			selected_weapon = kind
+			_refresh_weapon_label()
+			break
 	if Input.is_action_just_pressed("fire"):
 		request_fire.rpc_id(1, selected_weapon)
 	input_tick += 1
@@ -500,12 +499,38 @@ func _resolve_shot_hit(shot: Projectile) -> bool:
 		var reach := HALF.x + Weapon.RADIUS
 		for pid in players:
 			if pid == shot.owner_id:
-				continue                 # your own freeze ray passes through you
+				continue                 # your own shot passes through you
 			if shot.position.distance_to(players[pid].position) > reach:
 				continue
-			players[pid].frozen_remaining = Weapon.freeze_seconds(shot.kind)
-			player_frozen.rpc(pid, Weapon.freeze_seconds(shot.kind))
-			return true
+			if _apply_to_player(shot, pid):
+				return true
+			# No effect on this target -- carry on, so the shot can still reach
+			# somebody behind them.
+	return false
+
+## True when the shot actually did something to `pid` and is spent.
+func _apply_to_player(shot: Projectile, pid: int) -> bool:
+	var freeze := Weapon.freeze_seconds(shot.kind)
+	if freeze > 0.0:
+		# Already frozen: the shot passes through. Otherwise two players could
+		# hold a third in place forever by taking turns.
+		if players[pid].is_frozen():
+			return false
+		players[pid].frozen_remaining = freeze
+		player_frozen.rpc(pid, freeze)
+		return true
+	var steal := Weapon.steal_points(shot.kind)
+	if steal > 0:
+		var victim_had := int(scores.get(pid, 0))
+		if victim_had <= 0:
+			return false             # nothing in their pockets; the shot flies on
+		var taken := mini(steal, victim_had)
+		var thief_now := int(scores.get(shot.owner_id, 0)) + taken
+		scores_changed.rpc({pid: victim_had - taken, shot.owner_id: thief_now})
+		points_stolen.rpc(shot.owner_id, pid, taken)
+		if thief_now >= WIN_SCORE:
+			_finish_round(shot.owner_id)
+		return true
 	return false
 
 ## Server only. Shared by walking into a gem and by shooting one.
@@ -698,8 +723,9 @@ func server_fire(shooter: int, kind: int) -> int:
 	if price > 0 and int(scores.get(shooter, 0)) < price:
 		return 0
 	if price > 0:
-		scores[shooter] = int(scores.get(shooter, 0)) - price
-		_refresh_scores()
+		# Must be broadcast, not just applied here: with every weapon free this
+		# was invisible, but a priced weapon would silently desync the score.
+		scores_changed.rpc({shooter: int(scores.get(shooter, 0)) - price})
 	p.cooldowns[kind] = Weapon.cooldown(kind)
 
 	var dir: Vector2 = p.facing.normalized() if p.facing.length() > 0.001 else Vector2.RIGHT
@@ -753,6 +779,22 @@ func request_fire(kind: int) -> void:
 ## The freeze itself replicates through the synchronizer; this is the event, so
 ## the victim gets an immediate local reaction rather than waiting for the next
 ## 20 Hz sync to notice it has stopped moving.
+## A score moved for a reason other than picking something up: paying for a
+## shot, or having a point lifted. Small enough to be its own reliable event.
+@rpc("authority", "call_local", "reliable")
+func scores_changed(changed: Dictionary) -> void:
+	for pid in changed:
+		scores[pid] = int(changed[pid])
+	_refresh_scores()
+
+@rpc("authority", "call_local", "reliable")
+func points_stolen(thief: int, victim: int, amount: int) -> void:
+	if thief == multiplayer.get_unique_id():
+		_announce("Lifted %d point%s from %s" % [
+			amount, "" if amount == 1 else "s", _label_for(victim)])
+	elif victim == multiplayer.get_unique_id():
+		_announce("%s picked your pocket (-%d)" % [_label_for(thief), amount])
+
 @rpc("authority", "call_local", "reliable")
 func player_frozen(pid: int, seconds: float) -> void:
 	if players.has(pid):
@@ -1013,14 +1055,14 @@ func _refresh_weapon_label() -> void:
 	if is_dedicated:
 		return
 	var parts := PackedStringArray()
-	for kind in [Weapon.Kind.CAPTURE, Weapon.Kind.FREEZE]:
-		var key := "A" if kind == Weapon.Kind.CAPTURE else "S"
+	for kind in Weapon.Kind.values():
+		var key := Weapon.key_label(kind)
 		var mark := "[%s]" % key if kind == selected_weapon else " %s " % key
 		var price := Weapon.cost(kind)
 		parts.append("%s %s %s%s" % [
 			mark, Weapon.glyph(kind), Weapon.label(kind),
-			"" if price == 0 else " (%d pts)" % price])
-	weapon_label.text = "   ".join(parts) + "    SPACE to fire"
+			"" if price == 0 else " (%d)" % price])
+	weapon_label.text = "  ".join(parts) + "   SPACE to fire"
 
 func _refresh_scores() -> void:
 	if is_dedicated:
