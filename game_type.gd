@@ -11,6 +11,10 @@ extends RefCounted
 ##     server_prepare()        set spawn state before entering the tree
 ##     server_admit(peer)      put a player in, wherever that means
 ##     server_evict(peer)      take them out
+##     world_bounds()          how big the playfield is, for the camera
+##
+## `games/ashamed/` is the newest one, still a skeleton: a player, a container
+## and a spawner, and nothing else yet.
 ##
 ## Everything else -- lobby identity, visibility gating, the screen helpers --
 ## comes from the base class. Nothing in `main.gd` knows what a maze is, and
@@ -26,6 +30,11 @@ static var TYPES := {
 		"name": "A Mazing",
 		"blurb": "Grab gems in a lava maze. First to 25 takes the round.",
 		"scene": "res://games/amazing/amazing_world.tscn",
+	},
+	"ashamed": {
+		"name": "Ashamed",
+		"blurb": "A 2D side-scroller. Skeleton for now: players appear and leave.",
+		"scene": "res://games/ashamed/ashamed_world.tscn",
 	},
 }
 

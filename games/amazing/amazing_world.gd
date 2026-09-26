@@ -127,6 +127,9 @@ func _arm_join_chime() -> void:
 func server_prepare() -> void:
 	maze_seed = randi()
 
+func world_bounds() -> Rect2:
+	return Rect2(Vector2.ZERO, ARENA)
+
 
 ## Put a peer into this game. Where they land is the game's business.
 func server_admit(peer: int) -> void:

@@ -15,15 +15,15 @@ func after_each() -> void:
 ## `request_create_lobby` reads the sender, and offline that is always peer 1.
 ## For multi-lobby cases, drive the registry directly so each lobby keeps its
 ## own member -- otherwise peer 1 vacates the first one and it is pruned.
-func _make_lobby(wanted: String, members: Array) -> int:
+func _make_lobby(wanted: String, members: Array, type_id: String = GameType.DEFAULT) -> int:
 	var id: int = main._next_lobby_id
 	main._next_lobby_id += 1
 	main.lobbies[id] = {
 		"name": main._clean_lobby_name(wanted, id),
-		"type": GameType.DEFAULT,
+		"type": GameType.resolve(type_id),
 		"members": [],
 	}
-	main._create_world(id, GameType.DEFAULT)
+	main._create_world(id, GameType.resolve(type_id))
 	for m in members:
 		main._server_move_peer(m, id)
 	return id
@@ -182,6 +182,69 @@ func test_main_does_not_reach_into_the_game() -> void:
 	for required in ["server_prepare", "server_admit", "server_evict",
 			"refresh_visibility", "is_local", "gate"]:
 		ok(w.has_method(required), "World provides %s()" % required)
+
+func test_the_second_game_is_on_offer() -> void:
+	ok(GameType.known("ashamed"), "the server hosts Ashamed")
+	eq(GameType.name_of("ashamed"), "Ashamed", "by name")
+	ne(GameType.scene_path("ashamed"), GameType.scene_path("amazing"),
+		"and it is a different scene from A Mazing")
+
+func test_ashamed_is_shaped_like_a_side_scroller() -> void:
+	var id := _make_lobby("side quest", [], "ashamed")
+	var w: GameWorld = main.worlds[id]
+	var bounds: Rect2 = w.world_bounds()
+	ok(bounds.size.x > bounds.size.y * 2.0,
+		"the playfield is wide and short, not square")
+	# Players stand on the floor rather than anywhere in a box.
+	for peer in [7, 8, 9]:
+		w.server_admit(peer)
+		eq(w.players[peer].position.y, AshamedWorld.GROUND_Y,
+			"peer %d spawned on the ground line" % peer)
+
+func test_an_ashamed_lobby_spawns_an_ashamed_world() -> void:
+	main.request_create_lobby("skeleton", "ashamed")
+	var id: int = main.lobbies.keys()[0]
+	eq(main.lobbies[id]["type"], "ashamed", "the lobby is of that type")
+	var w: GameWorld = main.worlds[id]
+	eq(w.get_scene_file_path(), GameType.scene_path("ashamed"), "and got its scene")
+	ok(w is AshamedWorld, "which is an AshamedWorld")
+	ok(w is GameWorld, "and therefore a GameWorld")
+
+func test_two_types_can_run_side_by_side() -> void:
+	var a := _make_lobby("maze game", [1], "amazing")
+	var b := _make_lobby("skeleton", [2], "ashamed")
+	ok(main.worlds[a] is AmazingWorld, "one is A Mazing")
+	ok(main.worlds[b] is AshamedWorld, "the other is Ashamed")
+	ne(main.worlds[a].get_script(), main.worlds[b].get_script(), "different games")
+	ok(main.worlds[a]._can_see(1), "each still gates on its own membership")
+	not_ok(main.worlds[a]._can_see(2), "across types as well as within one")
+	ok(main.worlds[b]._can_see(2), "symmetrically")
+
+func test_ashamed_admits_and_evicts_players() -> void:
+	var id := _make_lobby("skeleton", [], "ashamed")
+	var w: GameWorld = main.worlds[id]
+	w.server_admit(7)
+	eq(w.players.size(), 1, "a player was admitted")
+	ok(w.players.has(7), "the right one")
+	w.server_admit(7)
+	eq(w.players.size(), 1, "admitting twice is harmless")
+	w.server_evict(7)
+	eq(w.players.size(), 0, "and evicting takes them out again")
+
+func test_every_registered_type_answers_the_contract() -> void:
+	# The real payoff: this loops over the catalogue, so a future game that
+	# forgets a method fails here rather than at runtime in somebody's lobby.
+	for type_id in GameType.ids():
+		var scene: PackedScene = GameType.scene(type_id)
+		var w = scene.instantiate()
+		ok(w is GameWorld, "%s extends GameWorld" % type_id)
+		for required in ["_setup", "server_prepare", "server_admit", "server_evict",
+				"refresh_visibility", "is_local", "gate", "world_bounds"]:
+			ok(w.has_method(required), "%s provides %s()" % [type_id, required])
+		var bounds: Rect2 = w.world_bounds()
+		ok(bounds.size.x > 0.0 and bounds.size.y > 0.0,
+			"%s declares a playfield with area" % type_id)
+		w.free()
 
 func test_a_second_type_needs_nothing_but_a_row() -> void:
 	# The honest test of an abstraction: register another game and check that

@@ -178,10 +178,19 @@ methods — `server_prepare`, `server_admit`, `server_evict`, `refresh_visibilit
 `world._open_spawn()` to pick a start position; now it calls `world.server_admit(peer)` and
 the game decides what arriving means.
 
-The test of an abstraction is whether a second implementation costs anything. One test
-registers a second type at runtime, creates a lobby of it, and checks that the lobby, the
-browser digest and the spawned scene all follow — without touching `main.gd`. If that test
-had needed a code change to pass, the seam would have been in the wrong place.
+The test of an abstraction is whether a second implementation costs anything, so the second
+one gets written: `games/ashamed/` is a second game — a 2D side-scroller, skeleton for now: players appear
+standing on the ground and leave again. It came to **~170 lines**, and the only file it
+changed outside its own folder was the one row in `game_type.gd`.
+
+Writing it immediately found a leak that a single implementation could never have exposed:
+the shell was clamping the camera to `AmazingWorld.ARENA`, because when there was only one
+game its arena *was* the playfield. A lobby of idle avatars is a different size. That became
+a fifth overridable method, `world_bounds()`, and `main.gd` now contains no reference to any
+specific game at all.
+
+This is the general pattern. You do not find out whether a base class is the right shape by
+looking at it; you find out by writing the second thing that has to fit.
 
 ## A footnote: the join chime
 

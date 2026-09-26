@@ -1,0 +1,41 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://games/ashamed/player.gd" id="1_player"]
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_player"]
+properties/0/path = NodePath(".:net_position")
+properties/0/spawn = true
+properties/0/replication_mode = 1
+properties/1/path = NodePath(".:net_velocity")
+properties/1/spawn = true
+properties/1/replication_mode = 1
+properties/2/path = NodePath(".:net_grounded")
+properties/2/spawn = true
+properties/2/replication_mode = 1
+properties/3/path = NodePath(".:last_tick")
+properties/3/spawn = true
+properties/3/replication_mode = 1
+
+[node name="Player" type="Node2D"]
+script = ExtResource("1_player")
+
+[node name="Icon" type="Label" parent="."]
+offset_left = -16.0
+offset_top = -16.0
+offset_right = 16.0
+offset_bottom = 16.0
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="NameTag" type="Label" parent="."]
+offset_left = -70.0
+offset_top = 17.0
+offset_right = 70.0
+offset_bottom = 35.0
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Sync" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("SceneReplicationConfig_player")
+replication_interval = 0.05
+public_visibility = false

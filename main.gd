@@ -142,14 +142,19 @@ func _setup_audio() -> void:
 
 ## Deliberately local-only: you hear your own pickups, never anyone else's.
 func _setup_camera() -> void:
-	# The arena is four viewports big now, so the view follows you.
-	camera.limit_left = 0
-	camera.limit_top = 0
-	camera.limit_right = int(AmazingWorld.ARENA.x)
-	camera.limit_bottom = int(AmazingWorld.ARENA.y)
 	camera.position_smoothing_enabled = true
 	camera.position_smoothing_speed = 8.0
-	camera.position = AmazingWorld.ARENA * 0.5
+
+## The playfield is the game's business, not the shell's, so the camera bounds
+## come from whichever world you are actually in.
+func _apply_camera_bounds(world: GameWorld) -> void:
+	var bounds := Rect2(Vector2.ZERO, Vector2(1152, 648)) if world == null \
+		else world.world_bounds()
+	camera.limit_left = int(bounds.position.x)
+	camera.limit_top = int(bounds.position.y)
+	camera.limit_right = int(bounds.end.x)
+	camera.limit_bottom = int(bounds.end.y)
+	camera.position = bounds.get_center()
 
 ## Two fonts, because order decides whose metrics win. Emoji-first makes Latin
 ## text inherit the emoji font's fixed advance width and come out spaced like
@@ -499,6 +504,7 @@ func _show_playing() -> void:
 	browser.visible = false
 	hud.visible = true
 	var w := local_world()
+	_apply_camera_bounds(w)
 	if w != null and w.has_method("refresh_hud"):
 		w.refresh_hud()
 

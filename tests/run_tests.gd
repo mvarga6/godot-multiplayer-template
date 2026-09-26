@@ -13,6 +13,7 @@ const SUITES := [
 	"res://tests/test_game_flow.gd",
 	"res://tests/test_combat.gd",
 	"res://tests/test_lobbies.gd",
+	"res://tests/test_ashamed.gd",
 ]
 
 var _total := 0

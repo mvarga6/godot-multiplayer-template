@@ -148,8 +148,29 @@ static var TYPES := {
 
 Every game extends `GameWorld`, which carries the parts that are true of *any* game running
 as one lobby among several: which lobby it is, who may see it, and the methods `Main` calls.
-A game overrides four — `_setup`, `server_prepare`, `server_admit`, `server_evict` — and
-inherits the rest.
+A game overrides five — `_setup`, `server_prepare`, `server_admit`, `server_evict`,
+`world_bounds` — and inherits the rest.
+
+`games/ashamed/` is the second game, and still the smallest thing that is a game type:
+players appear standing on the ground, and leave. It came to **~170 lines**, and the only
+file it changed outside its own folder was the one row in `game_type.gd`. That is the
+measurement that says whether an abstraction is real.
+
+It is side-on rather than top-down, which shows up in the playfield shape (4608×648 against
+A Mazing's 2304×1296) and in spawning along a ground line. Both are the game's own business —
+the shell learns the size through `world_bounds()` and has no opinion about which way up
+anything is.
+
+**Its physics needed something A Mazing did not.** In the maze, letting go of a key stops you
+dead, so the replayed state is a position and reconciliation can rebuild it from inputs
+alone. Under gravity you carry momentum, so `AshamedWorld.simulate()` takes and returns a
+position, a velocity *and* whether you are standing on something, and all three are
+replicated and replayed. Reconciling only the position would leave you in the right place
+moving the wrong way — in mid-jump, visibly so.
+
+One consequence worth knowing: when no input arrives in time, the server keeps running you
+the same direction but **never repeats the jump**. A jump is an edge, not a state, and a
+repeated edge would be a free second jump on every starved tick.
 
 `main.gd` contains no mention of mazes, gems, weapons or rounds. The HUD takes **text**: the
 game composes its own scoreboard and status line and calls `set_score_line()` /
@@ -440,6 +461,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `game_type.gd` | The catalogue of games this server hosts, and what scene each one spawns |
 | `game_world.gd` | Base class for any game: lobby identity, visibility gating, the methods `Main` calls |
 | `games/amazing/` | "A Mazing" — its World, maze, player, gems, projectiles, weapons, art and sounds |
+| `games/ashamed/` | "Ashamed" — a 2D side-scroller: gravity, jumping and running, server-authoritative |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |

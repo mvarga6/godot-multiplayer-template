@@ -1,0 +1,20 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://games/ashamed/ashamed_world.gd" id="1_world"]
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_world"]
+properties/0/path = NodePath(".:lobby_id")
+properties/0/spawn = true
+properties/0/replication_mode = 0
+
+[node name="AshamedWorld" type="Node2D"]
+script = ExtResource("1_world")
+
+[node name="Sync" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("SceneReplicationConfig_world")
+public_visibility = false
+
+[node name="Players" type="Node2D" parent="."]
+
+[node name="PlayerSpawner" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../Players")

@@ -56,6 +56,12 @@ func server_admit(_peer: int) -> void:
 func server_evict(_peer: int) -> void:
 	push_error("%s does not implement server_evict()" % get_script().resource_path)
 
+## How big this game's playfield is. The shell clamps the camera to it, and has
+## no other way of knowing -- a maze and a lobby of idle avatars are not the
+## same size.
+func world_bounds() -> Rect2:
+	return Rect2(Vector2.ZERO, Vector2(1152, 648))
+
 # --- lobby isolation ----------------------------------------------------------
 
 ## True when the local player is playing *this* game rather than another lobby's.
