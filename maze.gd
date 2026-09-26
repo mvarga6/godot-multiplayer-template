@@ -10,7 +10,17 @@ extends Node2D
 
 const COLS := 39      # odd, so the border and the carved cells line up
 const ROWS := 23
-const EXTRA_OPENINGS := 22   # a perfect maze is mean for a chase; punch some loops in it
+## How much of the arena is walkable floor, as a share of every cell in the grid.
+##
+## A perfect maze comes out around 0.48 and is mean for a chase: corridors one
+## cell wide, dead ends everywhere, and nowhere to dodge a freeze ray. Raising
+## this knocks out extra interior walls until the target is met, which widens
+## corridors and opens rooms without ever disconnecting anything — you only
+## remove walls, so everything reachable before is still reachable.
+##
+## The ceiling is (COLS-2)*(ROWS-2)/(COLS*ROWS) ~= 0.87, because the border is
+## always solid. Values above that are clamped to it.
+const OPEN_FRACTION := 0.62
 
 static var grid := PackedByteArray()   # COLS*ROWS, 1 = wall, 0 = open
 static var current_seed := 0
@@ -49,10 +59,62 @@ static func generate(maze_seed: int, arena: Vector2) -> void:
 		_put(n.x, n.y, 0)
 		stack.append(n)
 
-	for _i in EXTRA_OPENINGS:
-		var x := 1 + rng.randi() % (COLS - 2)
-		var y := 1 + rng.randi() % (ROWS - 2)
-		_put(x, y, 0)
+	_open_up_to(OPEN_FRACTION, rng)
+
+## Knock out interior walls, in a seeded random order, until `fraction` of the
+## grid is floor. Deterministic: same seed, same maze, which the whole
+## prediction and projectile story depends on.
+static func _open_up_to(fraction: float, rng: RandomNumberGenerator) -> void:
+	var total := COLS * ROWS
+	var interior := (COLS - 2) * (ROWS - 2)
+	var want := mini(int(round(clampf(fraction, 0.0, 1.0) * float(total))), interior)
+
+	var closed: Array[Vector2i] = []
+	var open_now := 0
+	for y in ROWS:
+		for x in COLS:
+			if at(x, y) == 0:
+				open_now += 1
+			elif x > 0 and y > 0 and x < COLS - 1 and y < ROWS - 1:
+				closed.append(Vector2i(x, y))
+
+	# Fisher-Yates on the seeded rng, so the choice is random but reproducible.
+	for i in range(closed.size() - 1, 0, -1):
+		var j := rng.randi() % (i + 1)
+		var swap := closed[i]
+		closed[i] = closed[j]
+		closed[j] = swap
+
+	# Only ever open a cell that already touches floor. Opening an isolated one
+	# would create a pocket nothing can walk to -- and `random_open_point` would
+	# cheerfully drop a gem in it. Repeat passes, because a cell that was not
+	# eligible early becomes eligible once a neighbour opens.
+	var progress := true
+	while open_now < want and progress:
+		progress = false
+		for c in closed:
+			if open_now >= want:
+				break
+			if at(c.x, c.y) == 0:
+				continue
+			if not _touches_open(c.x, c.y):
+				continue
+			_put(c.x, c.y, 0)
+			open_now += 1
+			progress = true
+
+static func _touches_open(x: int, y: int) -> bool:
+	return _is_open(x + 1, y) or _is_open(x - 1, y) or _is_open(x, y + 1) or _is_open(x, y - 1)
+
+## Share of the grid that is walkable. Handy for tuning OPEN_FRACTION.
+static func open_fraction() -> float:
+	if grid.is_empty():
+		return 0.0
+	var open := 0
+	for i in grid.size():
+		if grid[i] == 0:
+			open += 1
+	return float(open) / float(grid.size())
 
 static func _put(x: int, y: int, v: int) -> void:
 	grid[y * COLS + x] = v

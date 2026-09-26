@@ -61,6 +61,40 @@ func test_every_open_cell_is_reachable() -> void:
 				stack.append(n)
 		eq(seen.size(), open.size(), "seed %d: all %d open cells reachable" % [seed_value, open.size()])
 
+func test_the_maze_hits_its_open_fraction() -> void:
+	# OPEN_FRACTION is the tuning knob; generation must actually honour it.
+	for seed_value in [1, 17, 404, 90210, 31415]:
+		Maze.generate(seed_value, ARENA)
+		almost(Maze.open_fraction(), Maze.OPEN_FRACTION, 0.002,
+			"seed %d lands on the target openness" % seed_value)
+
+func test_the_open_fraction_is_reachable() -> void:
+	# The border is always solid, so the target can never exceed the interior.
+	var ceiling := float((Maze.COLS - 2) * (Maze.ROWS - 2)) / float(Maze.COLS * Maze.ROWS)
+	ok(Maze.OPEN_FRACTION <= ceiling,
+		"OPEN_FRACTION (%.2f) is within the %.2f ceiling" % [Maze.OPEN_FRACTION, ceiling])
+	ok(Maze.OPEN_FRACTION > 0.0, "and leaves somewhere to walk")
+
+func test_opening_up_never_disconnects_anything() -> void:
+	# Widening only ever removes walls, so connectivity cannot regress -- but it
+	# is the property the dot depends on, so prove it at the tuned value.
+	Maze.generate(2718, ARENA)
+	var open := _open_cells()
+	var seen := {}
+	var stack := [open[0]]
+	seen[open[0]] = true
+	while not stack.is_empty():
+		var c: Vector2i = stack.pop_back()
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var n: Vector2i = c + d
+			if n.x < 0 or n.y < 0 or n.x >= Maze.COLS or n.y >= Maze.ROWS:
+				continue
+			if Maze.at(n.x, n.y) != 0 or seen.has(n):
+				continue
+			seen[n] = true
+			stack.append(n)
+	eq(seen.size(), open.size(), "every one of the %d open cells is reachable" % open.size())
+
 func test_is_blocked_reads_the_grid() -> void:
 	Maze.generate(11, ARENA)
 	for c in _open_cells():

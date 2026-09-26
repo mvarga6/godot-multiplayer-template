@@ -8,7 +8,7 @@ const ARENA := Vector2(2304, 1296)  # a game rule, not a window size
 const HALF := Vector2(16, 16)
 const WIN_SCORE := 25            # points that win the round; the maze then regenerates
 const ANNOUNCE_SECONDS := 3.0
-const GAME_WINS := 10            # rounds won that take the whole game
+const GAME_WINS := 3            # rounds won that take the whole game
 const NAME_MAX := 16
 ## Bump this whenever the RPC surface changes. A client built against a
 ## different number is refused with a clear message instead of failing weirdly
