@@ -24,6 +24,10 @@ const INPUT_BUFFER_MAX := 4         # queue longer than this: the client has run
 const INPUT_QUEUE_CAP := 16         # hard cap, so a flooding client cannot grow it forever
 const PLAYER_SCENE := preload("res://player.tscn")
 const COLLECTIBLE_SCENE := preload("res://collectible.tscn")
+const PROJECTILE_SCENE := preload("res://projectile.tscn")
+## Where a shot is born, measured out from the player's centre so it does not
+## immediately collide with the shooter's own square.
+const MUZZLE_OFFSET := HALF.x + Weapon.RADIUS + 2.0
 
 var players: Dictionary = {}   # peer_id:int -> Player node
 var scores: Dictionary = {}    # peer_id:int -> points this round
@@ -39,6 +43,10 @@ var maze_seed := 0             # server: the seed every peer is currently genera
 var items: Dictionary = {}     # item_id:int -> Collectible node
 var _next_item_id := 1         # server: hands out item ids
 var _desired_items := MIN_ITEMS
+var shots: Dictionary = {}     # shot_id:int -> Projectile node
+var _next_shot_id := 1         # server: hands out shot ids
+var selected_weapon := Weapon.Kind.CAPTURE   # client-local: which key you last pressed
+var local_facing: Vector2 = Vector2.RIGHT    # client-local, for the aim indicator
 ## Godot hands every tree an OfflineMultiplayerPeer, so `multiplayer_peer != null`
 ## and `is_server()` are both true before you have hosted or joined anything.
 ## Track the session explicitly instead of trusting either of them.
@@ -53,6 +61,9 @@ var pending: Array = []        # inputs sent but not yet acknowledged by the ser
 @onready var players_root: Node2D = $Players
 @onready var player_spawner: MultiplayerSpawner = $PlayerSpawner
 @onready var item_spawner: MultiplayerSpawner = $ItemSpawner
+@onready var projectile_spawner: MultiplayerSpawner = $ProjectileSpawner
+@onready var shots_root: Node2D = $Projectiles
+@onready var weapon_label: Label = $Hud/WeaponLabel
 @onready var maze: Maze = $Maze
 @onready var items_root: Node2D = $Collectibles
 @onready var lobby: CanvasLayer = $Lobby
@@ -80,10 +91,12 @@ func _ready() -> void:
 	# announced it was leaving.
 	get_tree().auto_accept_quit = false
 	_setup_auth()
+	_setup_input()
 	_setup_spawners()
 	_setup_audio()
 	_setup_camera()
 	_setup_icon_picker()
+	_refresh_weapon_label()
 	announce_label.text = ""
 	_connect_multiplayer_signals()
 	var args := OS.get_cmdline_user_args()
@@ -227,6 +240,22 @@ static func simulate(pos: Vector2, dir: Vector2, delta: float) -> Vector2:
 ## each player's MultiplayerSynchronizer replaces the 20 Hz `update_state`
 ## broadcast. The spawners also replicate everything that already exists to a
 ## peer that connects later, which is the whole late-join catch-up loop gone.
+## Registered in code rather than in the input map, for the same reason stage 1
+## reused `ui_*`: it keeps the bindings next to the code that reads them.
+## Physical keycodes, so this is still A/S/Space on AZERTY.
+func _setup_input() -> void:
+	_bind_key("fire", KEY_SPACE)
+	_bind_key("select_capture", KEY_A)
+	_bind_key("select_freeze", KEY_S)
+
+func _bind_key(action: String, key: Key) -> void:
+	if InputMap.has_action(action):
+		return
+	InputMap.add_action(action)
+	var ev := InputEventKey.new()
+	ev.physical_keycode = key
+	InputMap.action_add_event(action, ev)
+
 func _setup_spawners() -> void:
 	player_spawner.spawn_function = _build_player
 	player_spawner.spawned.connect(_on_player_spawned)
@@ -237,6 +266,9 @@ func _setup_spawners() -> void:
 	item_spawner.add_spawnable_scene(COLLECTIBLE_SCENE.resource_path)
 	item_spawner.spawned.connect(_on_item_spawned)
 	item_spawner.despawned.connect(_on_item_despawned)
+	projectile_spawner.add_spawnable_scene(PROJECTILE_SCENE.resource_path)
+	projectile_spawner.spawned.connect(_on_shot_spawned)
+	projectile_spawner.despawned.connect(_on_shot_despawned)
 
 # --- spawn functions: run on every peer, building the node from the same data --
 
@@ -270,6 +302,12 @@ func _on_item_spawned(node: Node) -> void:
 
 func _on_item_despawned(node: Node) -> void:
 	items.erase(node.item_id)
+
+func _on_shot_spawned(node: Node) -> void:
+	shots[node.shot_id] = node
+
+func _on_shot_despawned(node: Node) -> void:
+	shots.erase(node.shot_id)
 
 func _on_player_despawned(node: Node) -> void:
 	var id: int = node.peer_id
@@ -369,6 +407,16 @@ func _physics_process(delta: float) -> void:
 
 func _send_input(delta: float) -> void:
 	var dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
+	if dir.length() > 0.001:
+		local_facing = dir.normalized()
+	if Input.is_action_just_pressed("select_capture"):
+		selected_weapon = Weapon.Kind.CAPTURE
+		_refresh_weapon_label()
+	elif Input.is_action_just_pressed("select_freeze"):
+		selected_weapon = Weapon.Kind.FREEZE
+		_refresh_weapon_label()
+	if Input.is_action_just_pressed("fire"):
+		request_fire.rpc_id(1, selected_weapon)
 	input_tick += 1
 	# Every tick now carries a sequence number, rather than only sending on
 	# change: reconciliation needs to know exactly which inputs the server saw.
@@ -379,10 +427,13 @@ func _send_input(delta: float) -> void:
 	if not players.has(me):
 		return
 	# Predict: move our own square immediately instead of waiting a round trip.
+	# A frozen player predicts standing still, or prediction would fight the
+	# server for the whole three seconds.
 	var p: Node2D = players[me]
-	p.position = simulate(p.position, dir, delta)
+	var moved: Vector2 = p.effective_dir(dir)
+	p.position = simulate(p.position, moved, delta)
 	p.target_position = p.position
-	pending.append({"tick": input_tick, "dir": dir, "delta": delta})
+	pending.append({"tick": input_tick, "dir": moved, "delta": delta})
 
 func _server_simulate(delta: float) -> void:
 	for id in players:
@@ -395,17 +446,77 @@ func _server_simulate(delta: float) -> void:
 			var inp: Dictionary = p.input_queue.pop_front()
 			p.input_dir = inp["dir"]
 			p.last_tick = inp["tick"]
-			p.position = simulate(p.position, p.input_dir, delta)
+			if p.input_dir.length() > 0.001:
+				p.facing = p.input_dir.normalized()   # shots come out this way
+			p.position = simulate(p.position, p.effective_dir(p.input_dir), delta)
 			consumed += 1
 		if consumed == 0:
 			# Nothing arrived in time. Assume they are still holding the same
 			# key; if that guess is wrong, reconciliation fixes it.
-			p.position = simulate(p.position, p.input_dir, delta)
+			p.position = simulate(p.position, p.effective_dir(p.input_dir), delta)
+		_tick_timers(p, delta)
 	for id in players:
 		players[id].net_position = players[id].position
+	_advance_shots(delta)
 	_expire_items(delta)
 	_check_pickup()
 	_top_up_items()
+
+## Server only: count down a player's freeze and its weapon cooldowns.
+func _tick_timers(p: Node2D, delta: float) -> void:
+	if p.frozen_remaining > 0.0:
+		p.frozen_remaining = maxf(0.0, p.frozen_remaining - delta)
+	for kind in p.cooldowns.keys():
+		var left := float(p.cooldowns[kind]) - delta
+		if left <= 0.0:
+			p.cooldowns.erase(kind)
+		else:
+			p.cooldowns[kind] = left
+
+## Server only: fly every shot and resolve whatever it ran into. Clients do the
+## flying half of this in `Projectile._process`; only here does it mean anything.
+func _advance_shots(delta: float) -> void:
+	for sid in shots.keys():
+		var shot: Projectile = shots[sid]
+		if not shot.advance(delta):
+			server_remove_shot(sid)      # expired, or hit a wall it cannot bounce off
+			continue
+		if _resolve_shot_hit(shot):
+			server_remove_shot(sid)
+
+## True when the shot is spent on whatever it touched.
+func _resolve_shot_hit(shot: Projectile) -> bool:
+	if Weapon.hits_items(shot.kind):
+		var reach := Collectible.RADIUS + Weapon.RADIUS
+		for iid in items.keys():
+			if shot.position.distance_to(items[iid].position) > reach:
+				continue
+			# The shot collects on the shooter's behalf, scoring exactly as if
+			# they had walked into it.
+			_award_item(shot.owner_id, iid)
+			return true
+	if Weapon.hits_players(shot.kind):
+		var reach := HALF.x + Weapon.RADIUS
+		for pid in players:
+			if pid == shot.owner_id:
+				continue                 # your own freeze ray passes through you
+			if shot.position.distance_to(players[pid].position) > reach:
+				continue
+			players[pid].frozen_remaining = Weapon.freeze_seconds(shot.kind)
+			player_frozen.rpc(pid, Weapon.freeze_seconds(shot.kind))
+			return true
+	return false
+
+## Server only. Shared by walking into a gem and by shooting one.
+func _award_item(pid: int, iid: int) -> void:
+	if not players.has(pid) or not items.has(iid):
+		return
+	var after := int(scores.get(pid, 0)) + int(Collectible.VALUE[items[iid].kind])
+	scores[pid] = after
+	server_remove_item(iid, pid, after)
+	# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
+	if after >= WIN_SCORE:
+		_finish_round(pid)
 
 func _check_pickup() -> void:
 	var reach := Collectible.RADIUS + HALF.x
@@ -415,12 +526,9 @@ func _check_pickup() -> void:
 			var item: Collectible = items[iid]
 			if ppos.distance_to(item.position) > reach:
 				continue
-			var after := int(scores.get(pid, 0)) + int(Collectible.VALUE[item.kind])
-			scores[pid] = after
-			server_remove_item(iid, pid, after)
-			# `>=`, not `==`: a 5-point diamond can jump 22 straight past 25.
-			if after >= WIN_SCORE:
-				_finish_round(pid)
+			var before := int(scores.get(pid, 0))
+			_award_item(pid, iid)
+			if before + int(Collectible.VALUE[item.kind]) >= WIN_SCORE:
 				return                     # the new round replaced every item
 			break                          # this player has had their pickup this tick
 
@@ -577,6 +685,40 @@ func server_add_item(kind: int, pos: Vector2, lifetime: float) -> int:
 	items[iid] = c                  # `spawned` is remote-only, so register ours
 	return iid
 
+## Server only: put a shot in the air. Returns its id, or 0 if the weapon was
+## not ready -- too soon since the last shot, or not enough points to pay for it.
+func server_fire(shooter: int, kind: int) -> int:
+	if not players.has(shooter) or not Weapon.is_kind(kind):
+		return 0
+	var p: Node2D = players[shooter]
+	if float(p.cooldowns.get(kind, 0.0)) > 0.0:
+		return 0
+	var price := Weapon.cost(kind)
+	if price > 0 and int(scores.get(shooter, 0)) < price:
+		return 0
+	if price > 0:
+		scores[shooter] = int(scores.get(shooter, 0)) - price
+		_refresh_scores()
+	p.cooldowns[kind] = Weapon.cooldown(kind)
+
+	var dir: Vector2 = p.facing.normalized() if p.facing.length() > 0.001 else Vector2.RIGHT
+	var sid := _next_shot_id
+	_next_shot_id += 1
+	var shot: Projectile = PROJECTILE_SCENE.instantiate()
+	shot.shot_id = sid
+	shot.setup(shooter, kind, dir * Weapon.speed(kind, SPEED), Weapon.lifespan(kind))
+	shot.position = p.position + dir * MUZZLE_OFFSET
+	shots_root.add_child(shot, true)
+	shots[sid] = shot              # `spawned` is remote-only, so register ours
+	return sid
+
+func server_remove_shot(sid: int) -> void:
+	if not shots.has(sid):
+		return
+	var node: Node = shots[sid]
+	shots.erase(sid)
+	node.queue_free()              # the spawner replicates the despawn
+
 ## `collector` is 0 when the item simply timed out. The despawn itself rides on
 ## the spawner; only the score and the sound need saying out loud.
 func server_remove_item(iid: int, collector: int, new_score: int) -> void:
@@ -592,6 +734,31 @@ func server_remove_item(iid: int, collector: int, new_score: int) -> void:
 	node.queue_free()
 
 # --- rpcs --------------------------------------------------------------------
+
+## Firing is an *event*, so it is reliable and separate from the 60 Hz movement
+## stream: "reliable for events, unreliable for state". A dropped shot would be
+## a shot the player believes they took.
+@rpc("any_peer", "call_local", "reliable")
+func request_fire(kind: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var id := multiplayer.get_remote_sender_id()
+	if id == 0:
+		id = 1                     # the host called it on itself
+	if not Weapon.is_kind(kind):
+		return                     # never trust an any_peer argument
+	server_fire(id, kind)
+
+## The freeze itself replicates through the synchronizer; this is the event, so
+## the victim gets an immediate local reaction rather than waiting for the next
+## 20 Hz sync to notice it has stopped moving.
+@rpc("authority", "call_local", "reliable")
+func player_frozen(pid: int, seconds: float) -> void:
+	if players.has(pid):
+		players[pid].frozen_remaining = seconds
+	if pid == multiplayer.get_unique_id():
+		pending.clear()            # predictions made while moving are void now
+		_announce("Frozen for %.0f seconds" % seconds)
 
 @rpc("authority", "call_local", "reliable")
 func item_collected(collector: int, new_score: int, kind: int) -> void:
@@ -652,6 +819,10 @@ func set_maze(seed_value: int, placements: Dictionary, winner: int, standings: D
 	_apply_maze(seed_value)
 	if multiplayer.is_server():
 		_clear_items()         # clients get a despawn per item from the spawner
+		_clear_shots()
+	for id in players:
+		players[id].frozen_remaining = 0.0
+		players[id].cooldowns.clear()
 	rounds_won = standings.duplicate()
 	round_index = round_no
 	for id in scores:
@@ -808,6 +979,13 @@ func _new_maze(winner: int = 0) -> void:
 		placements[id] = _open_spawn()
 	set_maze.rpc(seed_value, placements, winner, rounds_won, round_index)
 
+## Server only: the spawner replicates each despawn.
+func _clear_shots() -> void:
+	for sid in shots.keys():
+		if is_instance_valid(shots[sid]):
+			shots[sid].queue_free()
+	shots.clear()
+
 func _clear_items() -> void:
 	for iid in items.keys():
 		items[iid].queue_free()
@@ -821,6 +999,19 @@ func _open_spawn() -> Vector2:
 func _label_for(id: int) -> String:
 	var glyph: String = ICONS[int(icons.get(id, 0))]
 	return "%s %s" % [glyph, str(names.get(id, "Player %d" % id))]
+
+func _refresh_weapon_label() -> void:
+	if is_dedicated:
+		return
+	var parts := PackedStringArray()
+	for kind in [Weapon.Kind.CAPTURE, Weapon.Kind.FREEZE]:
+		var key := "A" if kind == Weapon.Kind.CAPTURE else "S"
+		var mark := "[%s]" % key if kind == selected_weapon else " %s " % key
+		var price := Weapon.cost(kind)
+		parts.append("%s %s %s%s" % [
+			mark, Weapon.glyph(kind), Weapon.label(kind),
+			"" if price == 0 else " (%d pts)" % price])
+	weapon_label.text = "   ".join(parts) + "    SPACE to fire"
 
 func _refresh_scores() -> void:
 	if is_dedicated:
@@ -908,6 +1099,7 @@ func _clear_world() -> void:
 	input_tick = 0
 	pending.clear()
 	_clear_items()
+	_clear_shots()
 	rounds_won.clear()
 	icons.clear()
 	names.clear()

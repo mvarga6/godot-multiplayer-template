@@ -18,6 +18,11 @@ spawn_path = NodePath("../Players")
 [node name="ItemSpawner" type="MultiplayerSpawner" parent="."]
 spawn_path = NodePath("../Collectibles")
 
+[node name="ProjectileSpawner" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../Projectiles")
+
+[node name="Projectiles" type="Node2D" parent="."]
+
 [node name="Players" type="Node2D" parent="." unique_id=1654191028]
 
 [node name="BroadcastTimer" type="Timer" parent="."]
@@ -147,6 +152,12 @@ theme_override_constants/v_separation = 4
 [node name="PlayAgain" type="Button" parent="GameOver/Root/Box"]
 layout_mode = 2
 text = "Play again"
+
+[node name="WeaponLabel" type="Label" parent="Hud"]
+offset_left = 16.0
+offset_top = 62.0
+offset_right = 700.0
+offset_bottom = 88.0
 
 [connection signal="pressed" from="Lobby/VBoxContainer/HostButton" to="." method="_on_host_button_pressed"]
 [connection signal="pressed" from="Lobby/VBoxContainer/JoinButton" to="." method="_on_join_button_pressed"]

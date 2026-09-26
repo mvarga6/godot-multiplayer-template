@@ -1,6 +1,6 @@
 # Notes: building a trivial online multiplayer game
 
-Seven stages, smallest-possible online game in Godot 4.7. Each stage ends in something you
+Eight stages, smallest-possible online game in Godot 4.7. Each stage ends in something you
 can run. Read them in order — later stages assume the vocabulary of earlier ones.
 
 | # | Stage | You end up with |
@@ -12,6 +12,7 @@ can run. Read them in order — later stages assume the vocabulary of earlier on
 | [5](05-dedicated-server.md) | Split the server out | A headless server process, clients connecting to it |
 | [6](06-deploy-to-vps.md) | Put it on the internet | Someone on another network playing with you |
 | [7](07-going-further.md) | Going further | Interpolation, prediction, shared objects |
+| [8](08-projectiles.md) | Projectiles | Two weapons players can use on each other |
 
 ## The whole thing in one picture
 

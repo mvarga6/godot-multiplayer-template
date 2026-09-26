@@ -2,8 +2,8 @@
 
 A deliberately tiny server-authoritative multiplayer game in Godot 4.7: coloured squares you
 move with the arrow keys through a randomly generated lava maze, racing to grab gold, rubies,
-emeralds and diamonds before they rot away. First to 25 wins the round, first to 10 rounds
-wins the game.
+emeralds and diamonds before they rot away — and shooting each other to get there first.
+First to 25 wins the round, first to 10 rounds wins the game.
 
 It exists to be read, not shipped. Every packet is a hand-written `@rpc` — nothing is
 auto-synced — so the whole network layer fits in one 230-line script you can hold in your
@@ -123,6 +123,38 @@ with 8 players, maximum-length names, a full item field and nine rounds played:
 
 If you add a field to an RPC, measure it: `var_to_bytes([args]).size()`. Anything approaching
 1200 bytes needs splitting.
+
+### Weapons
+
+`A` selects the Collector, `S` the Freeze Ray, `Space` fires. A Collector shot swallows a gem
+and scores it for whoever fired it; a Freeze Ray pins another player for three seconds. Both
+are configured from one table in `weapon.gd`:
+
+| | Speed | Cost | Lifespan | Reflect | Cooldown | Effect |
+|---|---|---|---|---|---|---|
+| Collector | 2× player | 0 | 2.5 s | off | 0.35 s | takes gems, ignores players |
+| Freeze Ray | 2× player | 0 | 2.5 s | off | 0.6 s | freezes players 3 s, ignores gems |
+
+Speed is a multiple of the player's, so retuning `SPEED` retunes the weapons with it. A third
+weapon should be a third row and nothing else.
+
+Three decisions worth knowing:
+
+- **Firing is a reliable event, not part of the input stream.** Movement is a 60 Hz stream
+  where a dropped packet self-corrects; a dropped *shot* is one the player believes they took
+  and nothing ever repairs. Same rule as spawn and despawn, applied to a third case.
+- **Only a shot's starting conditions replicate.** Owner, kind, position, velocity, lifespan
+  — then every peer integrates the same pure `Projectile.step()` against the same maze. The
+  maze-seed trick again: send what determines the motion, not the motion. Clients fly the
+  dot; the server alone decides it hit something and frees it.
+- **`frozen_remaining` is replicated because prediction depends on it.** A client that did
+  not know it was frozen would keep predicting movement for three seconds while the server
+  refused to move it, and reconciliation would yank it back twenty times a second. Both sides
+  gate input through `effective_dir()`, and the gated direction is what lands in `pending`,
+  so replay stays valid. `simulate()` itself stays pure and knows nothing about freezing.
+
+Walking into a gem and shooting one go through the same `_award_item()`, so they cannot drift
+apart.
 
 ### Rounds
 
@@ -328,6 +360,8 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 |---|---|
 | `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
+| `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
+| `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |
 | `maze.gd` | Seeded 19×11 grid maze: generation, collision queries, and the lava `_draw()` |
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
@@ -338,7 +372,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
 
-## The fourteen RPCs
+## The sixteen RPCs
 
 | RPC | Annotation | Why |
 |---|---|---|
@@ -347,6 +381,8 @@ same node sits at the same path on every peer. That is what makes RPC addressing
 | `spawn_item` | `authority, call_local, reliable` | An *event*. A missed spawn is an item nobody can see. |
 | `remove_item` | `authority, call_local, reliable` | Collection *and* expiry. A missed score is permanently wrong. |
 | `sync_world` | `authority, reliable` | Late-join catch-up: seed, scores, standings, icons, live items. Sent *before* the spawns. |
+| `request_fire` | `any_peer, call_local, reliable` | An *event*: a dropped shot is one the player thinks they took. |
+| `player_frozen` | `authority, call_local, reliable` | So the victim reacts now, not at the next 20 Hz sync. |
 | `request_identity` | `any_peer, call_local, reliable` | A client asks for an emoji and a name; both are validated. |
 | `apply_identity` | `authority, call_local, reliable` | The server is the one that tells everybody. |
 | `record_round` | `authority, call_local, reliable` | One finished round. Every peer keeps its own history. |

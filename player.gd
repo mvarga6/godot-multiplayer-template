@@ -9,6 +9,11 @@ var tint := Color.WHITE
 var input_dir: Vector2 = Vector2.ZERO   # last input actually applied
 var input_queue: Array = []             # inputs received but not yet applied
 var last_tick: int = 0                  # newest input consumed, echoed back to the owner
+## Where the last real movement pointed. Shots come out this way, so standing
+## still keeps you aiming where you were going rather than resetting to a
+## default. Derived from consumed input, so a client cannot fake it.
+var facing: Vector2 = Vector2.RIGHT
+var cooldowns: Dictionary = {}          # Weapon.Kind -> seconds until it can fire again
 
 ## Replicated by the Sync node, server -> everyone, at SYNC_HZ.
 ##
@@ -17,6 +22,11 @@ var last_tick: int = 0                  # newest input consumed, echoed back to 
 ## the interpolation. It lands here instead, and `Main` decides what to do with
 ## it — reconcile, if it is your own square; ease toward it, if it is not.
 var net_position: Vector2 = Vector2.ZERO
+
+## Seconds of enforced stillness left. Replicated because the owning client
+## predicts its own movement: if it did not know it was frozen it would keep
+## predicting motion and get yanked back 20 times a second.
+var frozen_remaining: float = 0.0
 
 # --- client-only state -------------------------------------------------------
 var target_position: Vector2 = Vector2.ZERO
@@ -32,6 +42,13 @@ var _display := ""
 func setup(id: int) -> void:
 	peer_id = id
 	name = str(id)
+
+func is_frozen() -> bool:
+	return frozen_remaining > 0.0
+
+## The direction this player will actually move, which is nowhere while frozen.
+func effective_dir(wanted: Vector2) -> Vector2:
+	return Vector2.ZERO if is_frozen() else wanted
 
 func set_identity(glyph: String, display: String) -> void:
 	_icon = glyph
@@ -62,6 +79,7 @@ func _ready() -> void:
 	name_label.add_theme_constant_override("outline_size", 4)
 
 func _process(delta: float) -> void:
+	_tint_for_freeze()
 	if is_local_authority:
 		return
 	# State arrives at 20 Hz, we draw at 60+. Ease toward the last known position
@@ -71,3 +89,12 @@ func _process(delta: float) -> void:
 	# lerp(a, b, 0.2) converges at different speeds at 30 and 144 fps, which is
 	# the same class of bug as forgetting `delta` entirely.
 	position = position.lerp(target_position, 1.0 - pow(0.001, delta))
+
+## Frozen players wash out to a pale blue so it is obvious who is stuck.
+func _tint_for_freeze() -> void:
+	if not is_node_ready():
+		return
+	var frozen := is_frozen()
+	icon_label.modulate = Color(0.55, 0.8, 1.0) if frozen else Color.WHITE
+	name_label.add_theme_color_override(
+		"font_color", Color(0.65, 0.85, 1.0) if frozen else tint)

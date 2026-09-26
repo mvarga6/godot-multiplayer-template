@@ -9,7 +9,9 @@ const SUITES := [
 	"res://tests/test_collectible.gd",
 	"res://tests/test_simulate.gd",
 	"res://tests/test_parsing.gd",
+	"res://tests/test_weapons.gd",
 	"res://tests/test_game_flow.gd",
+	"res://tests/test_combat.gd",
 ]
 
 var _total := 0
