@@ -83,5 +83,19 @@ func _draw() -> void:
 	if velocity.length() > 1.0:
 		var tail := -velocity.normalized() * (Weapon.RADIUS * 2.4)
 		draw_line(Vector2.ZERO, tail, Color(c.r, c.g, c.b, 0.35), Weapon.RADIUS * 0.9)
+
+	var tex: Texture2D = Weapon.texture(kind)
+	if tex != null:
+		# Native size, so a small sprite is not resampled into mush. Spin comes
+		# from the spec: a shard tumbles, a word stays the right way up.
+		var size := Vector2(tex.get_width(), tex.get_height())
+		var turn := age * Weapon.spin(kind)
+		if turn != 0.0:
+			draw_set_transform(Vector2.ZERO, turn, Vector2.ONE)
+		draw_texture_rect(tex, Rect2(-size * 0.5, size), false)
+		if turn != 0.0:
+			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		return
+
 	draw_circle(Vector2.ZERO, Weapon.RADIUS, c)
 	draw_circle(Vector2.ZERO, Weapon.RADIUS * 0.45, Color(1, 1, 1, 0.85))

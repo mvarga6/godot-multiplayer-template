@@ -23,6 +23,8 @@ const SPECS := {
 		"hits_players": false,
 		"freeze_seconds": 0.0,
 		"colour": Color(0.45, 0.95, 1.0),
+		"texture": preload("res://assets/net.png"),
+		"spin": 10.0,                # the net reads as a word; spinning it is nonsense
 	},
 	Kind.FREEZE: {
 		"label": "Freeze Ray",
@@ -36,9 +38,13 @@ const SPECS := {
 		"hits_players": true,
 		"freeze_seconds": 3.0,
 		"colour": Color(0.65, 0.80, 1.0),
+		"texture": preload("res://assets/freeze.png"),
+		"spin": 5.2,                # radians/sec: a tumbling shard
 	},
 }
 
+## Collision radius. Deliberately independent of whatever a weapon looks like —
+## a bigger sprite must not quietly become a bigger hitbox.
 const RADIUS := 5.0
 
 static func is_kind(kind: int) -> bool:
@@ -70,6 +76,16 @@ static func hits_players(kind: int) -> bool:
 
 static func freeze_seconds(kind: int) -> float:
 	return float(spec(kind)["freeze_seconds"])
+
+## Null when the weapon has no art and should be drawn instead.
+static func texture(kind: int) -> Texture2D:
+	return spec(kind).get("texture")
+
+## Radians per second. Cosmetic, and derived from `age`, so every peer spins a
+## shot identically without replicating anything. Zero for art that has an
+## up — a rotating "NET" is just unreadable.
+static func spin(kind: int) -> float:
+	return float(spec(kind).get("spin", 0.0))
 
 static func colour(kind: int) -> Color:
 	return spec(kind)["colour"]

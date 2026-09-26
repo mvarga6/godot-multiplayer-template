@@ -12,7 +12,7 @@ func before_each() -> void:
 
 func test_every_kind_is_fully_specified() -> void:
 	var required := ["label", "glyph", "speed_mult", "cost", "lifespan", "reflect",
-		"cooldown", "hits_items", "hits_players", "freeze_seconds", "colour"]
+		"cooldown", "hits_items", "hits_players", "freeze_seconds", "colour", "texture", "spin"]
 	for kind in Weapon.Kind.values():
 		ok(Weapon.is_kind(kind), "%s is a real kind" % Weapon.Kind.keys()[kind])
 		for key in required:
@@ -33,6 +33,29 @@ func test_the_two_weapons_do_different_jobs() -> void:
 	not_ok(Weapon.hits_items(Weapon.Kind.FREEZE), "and ignores gems")
 	eq(Weapon.freeze_seconds(Weapon.Kind.FREEZE), 3.0, "freezing lasts 3s by default")
 	eq(Weapon.freeze_seconds(Weapon.Kind.CAPTURE), 0.0, "the collector freezes nobody")
+
+func test_art_never_changes_the_hitbox() -> void:
+	for kind in Weapon.Kind.values():
+		var tex: Texture2D = Weapon.texture(kind)
+		ok(tex != null, "%s has a sprite" % Weapon.Kind.keys()[kind])
+		# A sprite bigger than the hitbox must not quietly widen it.
+		ok(float(tex.get_width()) > Weapon.RADIUS, "the sprite is wider than the hitbox")
+	almost(Weapon.RADIUS, 5.0, 0.001, "and the hitbox is unchanged by any of them")
+
+func test_art_is_still_optional() -> void:
+	# The drawn-dot fallback has to survive, or a new weapon must ship art.
+	# `erase` on a const Dictionary silently does nothing, so blank it instead.
+	var spec: Dictionary = Weapon.SPECS[Weapon.Kind.CAPTURE]
+	var original: Variant = spec["texture"]
+	spec["texture"] = null
+	eq(Weapon.texture(Weapon.Kind.CAPTURE), null, "a weapon with no art reports none")
+	spec["texture"] = original
+	ok(Weapon.texture(Weapon.Kind.CAPTURE) != null, "and the real sprite is put back")
+
+func test_spin_is_per_weapon() -> void:
+	# A tumbling shard reads well; a tumbling word does not.
+	ok(Weapon.spin(Weapon.Kind.FREEZE) > 0.0, "the freeze shard tumbles")
+	eq(Weapon.spin(Weapon.Kind.CAPTURE), 0.0, "the net stays the right way up")
 
 func test_an_unknown_kind_is_rejected() -> void:
 	not_ok(Weapon.is_kind(999), "999 is not a weapon")

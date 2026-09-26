@@ -97,6 +97,7 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_icon_picker()
 	_refresh_weapon_label()
+	hud.visible = false               # the lobby is what you see first
 	announce_label.text = ""
 	_connect_multiplayer_signals()
 	var args := OS.get_cmdline_user_args()
@@ -584,7 +585,7 @@ func _on_host_button_pressed() -> void:
 		return
 	multiplayer.multiplayer_peer = peer
 	in_session = true
-	lobby.hide()
+	_show_playing_ui()
 	_set_status("Hosting on %d, I am peer %d" % [port, multiplayer.get_unique_id()])
 	_new_maze()
 	server_add_player(1, _open_spawn())
@@ -638,7 +639,7 @@ func _on_peer_disconnected(id: int) -> void:
 
 func _on_connected_to_server() -> void:
 	in_session = true
-	lobby.hide()
+	_show_playing_ui()
 	_set_status("Connected, I am peer %d" % multiplayer.get_unique_id())
 
 func _on_connection_failed() -> void:
@@ -1000,6 +1001,14 @@ func _label_for(id: int) -> String:
 	var glyph: String = ICONS[int(icons.get(id, 0))]
 	return "%s %s" % [glyph, str(names.get(id, "Player %d" % id))]
 
+## The score and weapon readouts belong to a live session. Left visible they
+## sit on top of the Host/Join menu, which is just clutter over a screen where
+## you cannot shoot anything.
+func _show_playing_ui() -> void:
+	lobby.hide()
+	hud.visible = true
+	_refresh_weapon_label()
+
 func _refresh_weapon_label() -> void:
 	if is_dedicated:
 		return
@@ -1108,7 +1117,7 @@ func _clear_world() -> void:
 	game_finished = false
 	game_over_layer.visible = false
 	round_overlay.visible = false
-	hud.visible = true
+	hud.visible = false               # back at the lobby: nothing to show over it
 	for id in players.keys():
 		players[id].queue_free()
 	players.clear()
