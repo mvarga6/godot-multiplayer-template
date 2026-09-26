@@ -106,6 +106,27 @@ func test_leaving_takes_you_back_to_the_browser() -> void:
 	main.you_are_in(0)
 	eq(main.my_lobby_id, 0, "and back out again")
 
+func test_a_departing_peer_is_not_sent_messages() -> void:
+	# `peer_disconnected` fires after ENet has dropped them, so any rpc_id to
+	# that peer errors. The registry still has to be cleaned up.
+	not_ok(main._can_notify(818181), "a peer that never existed is unreachable")
+	ok(main._can_notify(1), "but the host can always talk to itself")
+
+func test_a_disconnect_empties_their_seat() -> void:
+	var id := _make_lobby("game", [1, 42])
+	eq(main.lobby_members(id).size(), 2, "two in the lobby")
+	main._on_peer_disconnected(42)
+	not_ok(main.is_member(id, 42), "the departed peer is out of the lobby")
+	not_ok(main.names.has(42), "and its identity is released")
+	not_ok(main.icons.has(42), "including its icon")
+	ok(main.lobbies.has(id), "the lobby survives while someone is still in it")
+
+func test_the_last_player_leaving_takes_the_lobby_with_them() -> void:
+	var id := _make_lobby("game", [42])
+	main._on_peer_disconnected(42)
+	not_ok(main.lobbies.has(id), "an empty lobby is pruned")
+	not_ok(main.worlds.has(id), "and its world with it")
+
 # --- the join chime -----------------------------------------------------------
 
 func test_your_own_arrival_is_not_announced_to_you() -> void:

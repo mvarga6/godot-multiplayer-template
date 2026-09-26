@@ -346,11 +346,20 @@ func _server_move_peer(peer: int, lobby_id: int) -> void:
 	# Membership just changed, so every gated synchronizer has to re-ask.
 	for id in worlds:
 		worlds[id].refresh_visibility()
-	you_are_in.rpc_id(peer, lobby_id)
+	# Not when they are leaving: `peer_disconnected` fires after ENet has
+	# already dropped them, and `rpc_id` to a peer that is gone is an error
+	# ("Attempt to call RPC with unknown peer ID"), not a no-op.
+	if _can_notify(peer):
+		you_are_in.rpc_id(peer, lobby_id)
 	_broadcast_lobbies()
 	# The host is already here; a client has to receive the World first.
 	if lobby_id != 0 and peer == 1:
 		_admit(lobby_id, 1)
+
+## Is this peer still someone we can talk to? Peer 1 is us, and `get_peers()`
+## lists the remote ones, so anything else has gone.
+func _can_notify(peer: int) -> bool:
+	return peer == 1 or multiplayer.get_peers().has(peer)
 
 ## A client reporting that its copy of the World has arrived. Only now is it
 ## safe to spawn their player into it.
