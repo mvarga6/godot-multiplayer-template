@@ -74,6 +74,13 @@ so their countdown lines up with everyone else's.
 
 `audio/background.mp3` loops under everything at -14 dB, started in `_setup_audio()`.
 
+`audio/player_join.mp3` plays when somebody walks into **the game you are already in** — not
+when you join, not for the players already present when you arrive, and not for anyone
+joining another lobby. Arriving hands you one spawn per player already there, so a naive
+hook would chime four times on entering a four-player game; the World stays silent until
+`JOIN_CHIME_ARM_DELAY` after your own square appears. The decision lives in
+`World.should_announce_join()` so it can be tested without an audio device.
+
 Each pickup kind has its own short cue — a flat two-note clink for gold, a warmer resolving
 third for a ruby, a rising major arpeggio for an emerald, a four-note sparkle with a
 shimmering tail for a diamond. They are generated WAVs, not samples; `tools/make_sounds.py`
@@ -123,6 +130,38 @@ with 8 players, maximum-length names, a full item field and nine rounds played:
 
 If you add a field to an RPC, measure it: `var_to_bytes([args]).size()`. Anything approaching
 1200 bytes needs splitting.
+
+### Lobbies
+
+Connecting to the server is not the same as joining a game. You connect, land on a browser
+listing every game and who is in it, and then create one (by name) or join one. Several run
+at once and cannot see each other.
+
+`Main` owns the socket, the handshake, the identities and the screen. Each game is a `World`
+node under `Worlds`. The server holds every World and simulates all of them; a client holds
+exactly one.
+
+**Separation is done with visibility.** `MultiplayerSpawner` has no visibility API, but
+`MultiplayerSynchronizer` does, and a spawn is only delivered to peers that can see the
+spawned node's synchronizer. So gating the synchronizer gates the spawn, the despawn and the
+updates together. Every replicated node is born `public_visibility = false`, and its World
+grants it per peer based on lobby membership. That one boolean per node per peer *is* the
+isolation.
+
+Three things that had to be right:
+
+- **`set_visibility_for()`, not `add_visibility_filter()`.** A filter runs on the
+  synchronizer's own schedule and will not reissue a spawn that was withheld before you
+  joined. Explicit per-peer visibility does.
+- **Grant outside-in, revoke inside-out.** Hiding a World despawns its whole subtree at once,
+  so sending each child's despawn afterwards produces one `ERR_UNAUTHORIZED` per item and
+  player — 16 of them for a 14-gem world with two players.
+- **Wait for the client to say it has the World.** Spawning a player into a World the client
+  has not received yet addresses `Worlds/world_3/PlayerSpawner`, which does not exist there.
+  The client's `World._ready` calls `world_ready`, and only then is it admitted.
+
+Identity belongs to the connection rather than a lobby, so your name and icon follow you
+between games; scores and rounds live in the World and die with your membership.
 
 ### Weapons
 
@@ -367,7 +406,8 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 
 | File | What it is |
 |---|---|
-| `main.gd` / `main.tscn` | Everything: lobby UI, peer registry, the six RPCs, server simulation, reconciliation |
+| `main.gd` / `main.tscn` | The shell: connection, handshake, identities, lobby registry, the browser, the screen |
+| `world.gd` / `world.tscn` | One running game: its maze, gems, shots, scores and rounds. The server runs several. |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |
@@ -375,7 +415,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
-| `tests/` | A self-contained runner and 65 tests. `make test` |
+| `tests/` | A self-contained runner and 117 tests. `make test` |
 | `notes/` | The seven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
@@ -534,6 +574,12 @@ reconciliation survive the refactor unchanged.
 - **`sync_world` was deleting the replay.** It called `_clear_items()` on the joiner, wiping
   the items the spawner had just handed it. The spawner was working the whole time; the game
   was destroying its output one frame later.
+- **`static` is an assumption about how many will ever exist.** `Maze` kept its grid in a
+  `static var` — fine for eight stages, and silently wrong the moment one process ran two
+  games. De-static-ing it cascaded into `simulate()` and `Projectile.step()`, which are pure
+  by design and so could no longer reach a global: the maze became their first argument.
+  Which is better anyway — a pure function reaching for global state was only pure by
+  politeness.
 - **A synchronizer whose `replication_config` is still empty when the node enters the tree
   fails outright**, with `Condition "!sync->get_replication_config_ptr()" is true ...
   ERR_UNCONFIGURED`. Building the config in `_ready()` is too late — it belongs in the

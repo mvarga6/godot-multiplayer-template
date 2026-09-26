@@ -35,3 +35,4 @@ vertical_alignment = 1
 [node name="Sync" type="MultiplayerSynchronizer" parent="."]
 replication_config = SubResource("SceneReplicationConfig_net")
 replication_interval = 0.05
+public_visibility = false

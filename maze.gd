@@ -3,6 +3,9 @@ extends Node2D
 
 ## A grid maze that both the server and every client generate from the same seed.
 ##
+## Instance state, not static: from stage 9 a server runs one of these per lobby,
+## and two games sharing one global grid would walk through each other's walls.
+##
 ## Only the seed goes over the wire. That matters more than it looks: `Main.simulate()`
 ## consults this grid while replaying buffered inputs during reconciliation, so if two
 ## peers disagreed about one wall, every prediction would be wrong forever. Replicating
@@ -22,14 +25,14 @@ const ROWS := 23
 ## always solid. Values above that are clamped to it.
 const OPEN_FRACTION := 0.62
 
-static var grid := PackedByteArray()   # COLS*ROWS, 1 = wall, 0 = open
-static var current_seed := 0
+var grid := PackedByteArray()   # COLS*ROWS, 1 = wall, 0 = open
+var current_seed := 0
 
-static var cell := Vector2.ZERO        # set by generate(), from Main.ARENA
+var cell := Vector2.ZERO        # set by generate(), from World.ARENA
 
 # --- generation --------------------------------------------------------------
 
-static func generate(maze_seed: int, arena: Vector2) -> void:
+func generate(maze_seed: int, arena: Vector2) -> void:
 	current_seed = maze_seed
 	cell = Vector2(arena.x / float(COLS), arena.y / float(ROWS))
 	grid = PackedByteArray()
@@ -64,7 +67,7 @@ static func generate(maze_seed: int, arena: Vector2) -> void:
 ## Knock out interior walls, in a seeded random order, until `fraction` of the
 ## grid is floor. Deterministic: same seed, same maze, which the whole
 ## prediction and projectile story depends on.
-static func _open_up_to(fraction: float, rng: RandomNumberGenerator) -> void:
+func _open_up_to(fraction: float, rng: RandomNumberGenerator) -> void:
 	var total := COLS * ROWS
 	var interior := (COLS - 2) * (ROWS - 2)
 	var want := mini(int(round(clampf(fraction, 0.0, 1.0) * float(total))), interior)
@@ -103,11 +106,11 @@ static func _open_up_to(fraction: float, rng: RandomNumberGenerator) -> void:
 			open_now += 1
 			progress = true
 
-static func _touches_open(x: int, y: int) -> bool:
+func _touches_open(x: int, y: int) -> bool:
 	return _is_open(x + 1, y) or _is_open(x - 1, y) or _is_open(x, y + 1) or _is_open(x, y - 1)
 
 ## Share of the grid that is walkable. Handy for tuning OPEN_FRACTION.
-static func open_fraction() -> float:
+func open_fraction() -> float:
 	if grid.is_empty():
 		return 0.0
 	var open := 0
@@ -116,16 +119,16 @@ static func open_fraction() -> float:
 			open += 1
 	return float(open) / float(grid.size())
 
-static func _put(x: int, y: int, v: int) -> void:
+func _put(x: int, y: int, v: int) -> void:
 	grid[y * COLS + x] = v
 
-static func at(x: int, y: int) -> int:
+func at(x: int, y: int) -> int:
 	return grid[y * COLS + x]
 
 # --- queries -----------------------------------------------------------------
 
 ## True when a `half`-radius square centred on `centre` overlaps any wall cell.
-static func is_blocked(centre: Vector2, half: float) -> bool:
+func is_blocked(centre: Vector2, half: float) -> bool:
 	if grid.is_empty():
 		return false                      # no maze yet: everything is open
 	var x0 := int(floor((centre.x - half) / cell.x))
@@ -142,7 +145,7 @@ static func is_blocked(centre: Vector2, half: float) -> bool:
 
 ## Centre of a random open cell. Server-side only — the result is sent explicitly,
 ## so it does not need to match anything a client would compute.
-static func random_open_point(rng: RandomNumberGenerator) -> Vector2:
+func random_open_point(rng: RandomNumberGenerator) -> Vector2:
 	if grid.is_empty():
 		return Vector2.ZERO           # no maze generated yet
 	var open: Array[Vector2i] = []
@@ -174,12 +177,12 @@ func _process(_delta: float) -> void:
 
 ## Stable per-cell value in 0..1. Folded with the seed so a new maze gets a new
 ## pattern rather than the same blotches in the same places.
-static func _hash01(x: int, y: int) -> float:
+func _hash01(x: int, y: int) -> float:
 	var n: int = (x * 73856093) ^ (y * 19349663) ^ (current_seed * 83492791)
 	return float(absi(n) % 1024) / 1024.0
 
 ## How much of this wall cell is exposed to walkable ground, 0..1.
-static func _exposure(x: int, y: int) -> float:
+func _exposure(x: int, y: int) -> float:
 	var open := 0
 	for d: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 		var nx: int = x + d.x
@@ -223,7 +226,7 @@ func _draw_seams(x: int, y: int, rect: Rect2, pulse: float) -> void:
 	if _is_open(x + 1, y):
 		draw_rect(Rect2(rect.position + Vector2(cell.x - SEAM, 0), Vector2(SEAM, cell.y)), glow)
 
-static func _is_open(x: int, y: int) -> bool:
+func _is_open(x: int, y: int) -> bool:
 	if x < 0 or y < 0 or x >= COLS or y >= ROWS:
 		return false
 	return at(x, y) == 0

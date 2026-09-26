@@ -20,6 +20,8 @@ var velocity: Vector2 = Vector2.ZERO
 var lifespan: float = 2.5
 var age: float = 0.0
 
+var _maze: Maze = null
+
 func setup(shooter: int, weapon_kind: int, vel: Vector2, life: float) -> void:
 	owner_id = shooter
 	kind = weapon_kind
@@ -30,13 +32,13 @@ func setup(shooter: int, weapon_kind: int, vel: Vector2, life: float) -> void:
 ## flips a component) and whether the shot is finished.
 ##
 ## Reads only its arguments and the shared maze, so server and client agree.
-static func step(pos: Vector2, vel: Vector2, delta: float, reflect: bool) -> Dictionary:
+static func step(maze: Maze, pos: Vector2, vel: Vector2, delta: float, reflect: bool) -> Dictionary:
 	var out_pos := pos
 	var out_vel := vel
 	var dead := false
 
 	var try_x := Vector2(out_pos.x + out_vel.x * delta, out_pos.y)
-	if Maze.is_blocked(try_x, Weapon.RADIUS):
+	if maze.is_blocked(try_x, Weapon.RADIUS):
 		if reflect:
 			out_vel.x = -out_vel.x
 		else:
@@ -45,7 +47,7 @@ static func step(pos: Vector2, vel: Vector2, delta: float, reflect: bool) -> Dic
 		out_pos = try_x
 
 	var try_y := Vector2(out_pos.x, out_pos.y + out_vel.y * delta)
-	if Maze.is_blocked(try_y, Weapon.RADIUS):
+	if maze.is_blocked(try_y, Weapon.RADIUS):
 		if reflect:
 			out_vel.y = -out_vel.y
 		else:
@@ -63,15 +65,24 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if multiplayer.has_multiplayer_peer() and multiplayer.is_server():
 		return
-	advance(delta)
+	advance(_own_maze(), delta)
 	queue_redraw()
 
+## The maze of the world this shot is flying through. Walking up beats storing a
+## reference, because a node reference cannot ride along in spawn state.
+func _own_maze() -> Maze:
+	if _maze == null and get_parent() != null and get_parent().get_parent() != null:
+		_maze = get_parent().get_parent().maze
+	return _maze
+
 ## One tick of flight. Returns false once the shot is spent.
-func advance(delta: float) -> bool:
+func advance(maze: Maze, delta: float) -> bool:
 	age += delta
 	if age >= lifespan:
 		return false
-	var r := step(position, velocity, delta, Weapon.reflects(kind))
+	if maze == null:
+		return true                  # no world to collide with yet
+	var r := step(maze, position, velocity, delta, Weapon.reflects(kind))
 	position = r["pos"]
 	velocity = r["vel"]
 	return not bool(r["dead"])

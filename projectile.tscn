@@ -30,3 +30,4 @@ script = ExtResource("1_projectile")
 
 [node name="Sync" type="MultiplayerSynchronizer" parent="."]
 replication_config = SubResource("SceneReplicationConfig_shot")
+public_visibility = false

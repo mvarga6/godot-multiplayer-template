@@ -1,32 +1,15 @@
 [gd_scene format=3 uid="uid://cqdf1yprlm4ju"]
 
-[ext_resource type="Script" path="res://maze.gd" id="2_maze"]
 [ext_resource type="AudioStream" path="res://audio/background.mp3" id="3_music"]
 [ext_resource type="Script" uid="uid://d2espvwu27hmv" path="res://main.gd" id="1_main"]
 
 [node name="Main" type="Node2D" unique_id=1686026068]
 script = ExtResource("1_main")
 
-[node name="Maze" type="Node2D" parent="."]
-script = ExtResource("2_maze")
+[node name="Worlds" type="Node2D" parent="."]
 
-[node name="Collectibles" type="Node2D" parent="."]
-
-[node name="PlayerSpawner" type="MultiplayerSpawner" parent="."]
-spawn_path = NodePath("../Players")
-
-[node name="ItemSpawner" type="MultiplayerSpawner" parent="."]
-spawn_path = NodePath("../Collectibles")
-
-[node name="ProjectileSpawner" type="MultiplayerSpawner" parent="."]
-spawn_path = NodePath("../Projectiles")
-
-[node name="Projectiles" type="Node2D" parent="."]
-
-[node name="Players" type="Node2D" parent="." unique_id=1654191028]
-
-[node name="BroadcastTimer" type="Timer" parent="."]
-wait_time = 0.05
+[node name="WorldSpawner" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../Worlds")
 
 [node name="Music" type="AudioStreamPlayer" parent="."]
 stream = ExtResource("3_music")
@@ -159,7 +142,64 @@ offset_top = 62.0
 offset_right = 700.0
 offset_bottom = 88.0
 
+[node name="Browser" type="CanvasLayer" parent="."]
+visible = false
+
+[node name="Root" type="Control" parent="Browser"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Dim" type="ColorRect" parent="Browser/Root"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.06, 0.05, 0.08, 0.96)
+
+[node name="Box" type="VBoxContainer" parent="Browser/Root"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 60.0
+offset_top = 40.0
+offset_right = -60.0
+offset_bottom = -40.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Browser/Root/Box"]
+layout_mode = 2
+text = "Games on this server"
+
+[node name="New" type="HBoxContainer" parent="Browser/Root/Box"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="LobbyName" type="LineEdit" parent="Browser/Root/Box/New"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "name your game"
+
+[node name="Create" type="Button" parent="Browser/Root/Box/New"]
+layout_mode = 2
+text = "Start a new game"
+
+[node name="Scroll" type="ScrollContainer" parent="Browser/Root/Box"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="List" type="VBoxContainer" parent="Browser/Root/Box/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
 [connection signal="pressed" from="Lobby/VBoxContainer/HostButton" to="." method="_on_host_button_pressed"]
 [connection signal="pressed" from="Lobby/VBoxContainer/JoinButton" to="." method="_on_join_button_pressed"]
 [connection signal="timeout" from="BroadcastTimer" to="." method="_on_broadcast_timer_timeout"]
 [connection signal="pressed" from="GameOver/Root/Box/PlayAgain" to="." method="_on_play_again_pressed"]
+[connection signal="pressed" from="Browser/Root/Box/New/Create" to="." method="_on_create_lobby_pressed"]

@@ -25,3 +25,4 @@ script = ExtResource("1_collectible")
 [node name="Sync" type="MultiplayerSynchronizer" parent="."]
 replication_config = SubResource("SceneReplicationConfig_item")
 replication_interval = 0.5
+public_visibility = false

@@ -1,12 +1,17 @@
 extends GameTest
 
+var maze := Maze.new()
+
+func after_each() -> void:
+	maze.free()
+
 ## Stage 8: the weapon spec table and the pure projectile step.
 
 const ARENA := Vector2(2304, 1296)
 const TICK := 1.0 / 60.0
 
 func before_each() -> void:
-	Maze.grid = PackedByteArray()      # no walls: isolate flight from the maze
+	maze.grid = PackedByteArray()      # no walls: isolate flight from the maze
 
 # --- the spec table -----------------------------------------------------------
 
@@ -88,26 +93,26 @@ func test_a_shot_travels_at_its_configured_speed() -> void:
 	var vel := Vector2.RIGHT * Weapon.speed(Weapon.Kind.CAPTURE, 220.0)
 	var pos := Vector2(500, 500)
 	for i in 60:
-		pos = Projectile.step(pos, vel, TICK, false)["pos"]
+		pos = Projectile.step(maze, pos, vel, TICK, false)["pos"]
 	almost(pos.x - 500.0, 440.0, 0.01, "one second of flight covers 2x SPEED")
 
 func test_stepping_is_pure() -> void:
-	var a: Dictionary = Projectile.step(Vector2(120, 340), Vector2(200, -90), TICK, false)
+	var a: Dictionary = Projectile.step(maze, Vector2(120, 340), Vector2(200, -90), TICK, false)
 	for i in 30:
-		eq(Projectile.step(Vector2(120, 340), Vector2(200, -90), TICK, false)["pos"],
+		eq(Projectile.step(maze, Vector2(120, 340), Vector2(200, -90), TICK, false)["pos"],
 			a["pos"], "same inputs, same answer -- every peer flies it identically")
 
 func test_a_wall_eats_a_shot_that_does_not_reflect() -> void:
-	Maze.generate(31337, ARENA)
+	maze.generate(31337, ARENA)
 	var hit := false
 	for y in range(1, Maze.ROWS - 1):
 		for x in range(1, Maze.COLS - 2):
-			if Maze.at(x, y) != 0 or Maze.at(x + 1, y) != 1:
+			if maze.at(x, y) != 0 or maze.at(x + 1, y) != 1:
 				continue
-			var pos := (Vector2(x, y) + Vector2(0.5, 0.5)) * Maze.cell
+			var pos := (Vector2(x, y) + Vector2(0.5, 0.5)) * maze.cell
 			var vel := Vector2.RIGHT * 440.0
 			for i in 60:
-				var r: Dictionary = Projectile.step(pos, vel, TICK, false)
+				var r: Dictionary = Projectile.step(maze, pos, vel, TICK, false)
 				pos = r["pos"]
 				if bool(r["dead"]):
 					hit = true
@@ -117,16 +122,16 @@ func test_a_wall_eats_a_shot_that_does_not_reflect() -> void:
 	ok(false, "no wall found to shoot at")
 
 func test_reflection_turns_a_shot_around_instead() -> void:
-	Maze.generate(31337, ARENA)
+	maze.generate(31337, ARENA)
 	for y in range(1, Maze.ROWS - 1):
 		for x in range(1, Maze.COLS - 2):
-			if Maze.at(x, y) != 0 or Maze.at(x + 1, y) != 1:
+			if maze.at(x, y) != 0 or maze.at(x + 1, y) != 1:
 				continue
-			var pos := (Vector2(x, y) + Vector2(0.5, 0.5)) * Maze.cell
+			var pos := (Vector2(x, y) + Vector2(0.5, 0.5)) * maze.cell
 			var vel := Vector2.RIGHT * 440.0
 			var bounced := false
 			for i in 60:
-				var r: Dictionary = Projectile.step(pos, vel, TICK, true)
+				var r: Dictionary = Projectile.step(maze, pos, vel, TICK, true)
 				pos = r["pos"]
 				vel = r["vel"]
 				not_ok(bool(r["dead"]), "a reflecting shot is never killed by a wall")
@@ -134,18 +139,18 @@ func test_reflection_turns_a_shot_around_instead() -> void:
 					bounced = true
 					break
 			ok(bounced, "it comes back the other way")
-			not_ok(Maze.is_blocked(pos, Weapon.RADIUS), "and never ends up inside the wall")
+			not_ok(maze.is_blocked(pos, Weapon.RADIUS), "and never ends up inside the wall")
 			return
 	ok(false, "no wall found to bounce off")
 
 func test_a_shot_never_ends_a_step_inside_a_wall() -> void:
-	Maze.generate(4242, ARENA)
+	maze.generate(4242, ARENA)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 9
-	var pos := Maze.random_open_point(rng)
+	var pos := maze.random_open_point(rng)
 	var vel := Vector2(1, 0.4).normalized() * 440.0
 	for i in 300:
-		var r: Dictionary = Projectile.step(pos, vel, TICK, true)
+		var r: Dictionary = Projectile.step(maze, pos, vel, TICK, true)
 		pos = r["pos"]
 		vel = r["vel"]
-		not_ok(Maze.is_blocked(pos, Weapon.RADIUS), "step %d stays out of the walls" % i)
+		not_ok(maze.is_blocked(pos, Weapon.RADIUS), "step %d stays out of the walls" % i)
