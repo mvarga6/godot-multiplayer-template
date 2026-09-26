@@ -62,6 +62,11 @@ func server_evict(_peer: int) -> void:
 func world_bounds() -> Rect2:
 	return Rect2(Vector2.ZERO, Vector2(1152, 648))
 
+## Where the camera should look, given the local player's node. Most games just
+## follow the body; one with a perspective floor may want to hold an axis still.
+func camera_focus(player: Node) -> Vector2:
+	return player.position
+
 # --- lobby isolation ----------------------------------------------------------
 
 ## True when the local player is playing *this* game rather than another lobby's.

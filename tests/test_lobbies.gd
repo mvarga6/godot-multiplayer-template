@@ -195,11 +195,13 @@ func test_ashamed_is_shaped_like_a_side_scroller() -> void:
 	var bounds: Rect2 = w.world_bounds()
 	ok(bounds.size.x > bounds.size.y * 2.0,
 		"the playfield is wide and short, not square")
-	# Players stand on the floor rather than anywhere in a box.
+	# Players stand *on* the floor plane, at some depth into it.
 	for peer in [7, 8, 9]:
 		w.server_admit(peer)
-		eq(w.players[peer].position.y, AshamedWorld.GROUND_Y,
-			"peer %d spawned on the ground line" % peer)
+		var p = w.players[peer]
+		eq(p.height, 0.0, "peer %d spawned standing on the floor" % peer)
+		between(p.ground.y, 0.0, AshamedWorld.DEPTH_RANGE,
+			"peer %d spawned within the floor's depth" % peer)
 
 func test_an_ashamed_lobby_spawns_an_ashamed_world() -> void:
 	main.request_create_lobby("skeleton", "ashamed")

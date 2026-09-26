@@ -652,7 +652,7 @@ func _process(_delta: float) -> void:
 	if w != null:
 		var me := multiplayer.get_unique_id()
 		if w.players.has(me):
-			camera.position = w.players[me].position
+			camera.position = w.camera_focus(w.players[me])
 	if announce_label.text != "" and Time.get_unix_time_from_system() > _announce_until:
 		announce_label.text = ""
 

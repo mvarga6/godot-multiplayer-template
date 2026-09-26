@@ -3,18 +3,21 @@
 [ext_resource type="Script" path="res://games/ashamed/player.gd" id="1_player"]
 
 [sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_player"]
-properties/0/path = NodePath(".:net_position")
+properties/0/path = NodePath(".:net_ground")
 properties/0/spawn = true
 properties/0/replication_mode = 1
-properties/1/path = NodePath(".:net_velocity")
+properties/1/path = NodePath(".:net_height")
 properties/1/spawn = true
 properties/1/replication_mode = 1
-properties/2/path = NodePath(".:net_grounded")
+properties/2/path = NodePath(".:net_v_height")
 properties/2/spawn = true
 properties/2/replication_mode = 1
-properties/3/path = NodePath(".:last_tick")
+properties/3/path = NodePath(".:net_grounded")
 properties/3/spawn = true
 properties/3/replication_mode = 1
+properties/4/path = NodePath(".:last_tick")
+properties/4/spawn = true
+properties/4/replication_mode = 1
 
 [node name="Player" type="Node2D"]
 script = ExtResource("1_player")

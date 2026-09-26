@@ -148,18 +148,66 @@ static var TYPES := {
 
 Every game extends `GameWorld`, which carries the parts that are true of *any* game running
 as one lobby among several: which lobby it is, who may see it, and the methods `Main` calls.
-A game overrides five — `_setup`, `server_prepare`, `server_admit`, `server_evict`,
-`world_bounds` — and inherits the rest.
+A game overrides six — `_setup`, `server_prepare`, `server_admit`, `server_evict`,
+`world_bounds`, `camera_focus` — and inherits the rest.
 
-`games/ashamed/` is the second game, and still the smallest thing that is a game type:
-players appear standing on the ground, and leave. It came to **~170 lines**, and the only
+`games/ashamed/` is the second game, and it began as the smallest thing that is a game type:
+players appeared standing on the ground, and left. It came to **~170 lines**, and the only
 file it changed outside its own folder was the one row in `game_type.gd`. That is the
-measurement that says whether an abstraction is real.
+measurement that says whether an abstraction is real. It has since grown into a 2.5D
+side-scroller, and still changes nothing outside its folder.
 
 It is side-on rather than top-down, which shows up in the playfield shape (4608×648 against
 A Mazing's 2304×1296) and in spawning along a ground line. Both are the game's own business —
-the shell learns the size through `world_bounds()` and has no opinion about which way up
-anything is.
+the shell learns the size through `world_bounds()`, follows the player through
+`camera_focus()`, and has no opinion about which way up anything is.
+
+**It is 2.5D**, which is a state-design decision far more than a rendering one. A body holds
+three numbers — `ground.x` along the level, `ground.y` *into the screen*, and `height` off
+the floor — and none of them is a screen coordinate. One function flattens them:
+
+```gdscript
+static func project(ground: Vector2, height: float, eye_x: float) -> Vector2:
+    var k := depth_scale(ground.y)
+    return Vector2(
+        eye_x + (ground.x - eye_x) * k,
+        lerpf(GROUND_NEAR_Y, GROUND_FAR_Y, depth_ratio(ground.y)) - height * k)
+```
+
+**One rule keeps it honest: every world-space length is drawn multiplied by the
+foreshortening at its depth.** There are three such lengths, and scaling some but not others
+is what makes a pseudo-dimension look wrong:
+
+| Length | Drawn as |
+|---|---|
+| the body's own size | `scale = depth_scale(depth)` |
+| the height of its jump | `height * depth_scale(depth)` |
+| its distance sideways from the camera axis | `(x - eye_x) * depth_scale(depth)` |
+
+The jump one is easy to get wrong, because `height` looks like a screen offset and is not:
+subtract it raw and a body drawn at 0.6 scale still leaps its full near-field pixel height,
+towering over the figure making it. The *model* is untouched by any of this — `simulate()`
+neither knows nor cares how deep you are, and a jump's apex is the same number of world units
+everywhere. Only its drawing shrinks.
+
+Depth and height both move you up the screen, which is the illusion, and also why they are
+separate fields: gravity may touch one and must never touch the other. It is also why a body
+in the air draws a shadow on the floor beneath it — without one, "far away" and "high up" are
+the same picture.
+
+Recession is perspective-correct rather than linear — `d / (d + FOCAL)`, normalised — so a
+quarter of the way back is 45% of the way up the screen, and depth rules drawn at even world
+intervals bunch toward the horizon. The floor's own edges go through `project` too, so it
+converges to a vanishing point instead of being a full-width band with small figures on it.
+`eye_x` is the axis that convergence happens about: the camera's, which means the player you
+control never slides sideways as they walk in.
+
+**The wire carries the world, never the screen.** `net_ground`, `net_height`, `net_v_height`,
+`net_grounded` replicate; `position`, `scale` and `z_index` are derived on arrival. Remote
+players interpolate the *world* values and project afterwards — projecting first and
+interpolating the result would slide a body in a straight line between two points on a curve,
+at a constant size, through the wrong z-order. Same rule as the maze seed: replicate the
+cause, derive the effect.
 
 **Its physics needed something A Mazing did not.** In the maze, letting go of a key stops you
 dead, so the replayed state is a position and reconciliation can rebuild it from inputs
@@ -461,7 +509,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `game_type.gd` | The catalogue of games this server hosts, and what scene each one spawns |
 | `game_world.gd` | Base class for any game: lobby identity, visibility gating, the methods `Main` calls |
 | `games/amazing/` | "A Mazing" — its World, maze, player, gems, projectiles, weapons, art and sounds |
-| `games/ashamed/` | "Ashamed" — a 2D side-scroller: gravity, jumping and running, server-authoritative |
+| `games/ashamed/` | "Ashamed" — a 2.5D side-scroller: running, depth, gravity and jumping, server-authoritative |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |
@@ -469,8 +517,8 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
-| `tests/` | A self-contained runner and 117 tests. `make test` |
-| `notes/` | The seven-stage write-up this was built from |
+| `tests/` | A self-contained runner and 162 tests. `make test` |
+| `notes/` | The ten-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.
