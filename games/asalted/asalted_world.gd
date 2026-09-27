@@ -35,6 +35,16 @@ const SHOT_RANGE := 120.0
 const SHOT_COOLDOWN := 0.55
 const HIT_RADIUS := 0.55             # a little wider than the body: forgiving aim
 
+## Long enough to feel like a penalty and read the killfeed, short enough that
+## you are not watching someone else's game.
+const RESPAWN_DELAY := 2.5
+
+## Clips are discovered from the folder rather than listed here, so dropping
+## `shoot4.mp3` in beside the others adds a variation with no code change.
+const SFX_DIR := "res://games/asalted/audio"
+
+const CONTROLS := "WASD move   SPACE jump   MOUSE look   CLICK fire   ESC free the mouse"
+
 const INPUT_BUFFER_MAX := 4
 const INPUT_QUEUE_CAP := 16
 
@@ -77,7 +87,7 @@ func _setup() -> void:
 	if _can_render():
 		arena.build()
 		_build_view()
-	set_status_line("WASD move   SPACE jump   MOUSE look   CLICK fire   ESC free the mouse")
+	set_status_line(CONTROLS)
 
 func server_prepare() -> void:
 	arena_seed = randi()
@@ -167,6 +177,14 @@ static func _settle(barriers: Array, p: Vector3, v: float, from_y: float) -> Arr
 		return [support, 0.0, true]
 	return [p.y, v, false]
 
+## Did this input actually push off the floor?
+##
+## Exactly the condition `simulate` uses to apply the impulse, pulled out so the
+## sound cannot drift away from the physics -- and so that walking off a ledge,
+## which also leaves you airborne, does not make a jumping noise.
+static func is_jump_start(grounded: bool, jump: bool) -> bool:
+	return jump and grounded
+
 ## Where the eye is, and which way it looks. Shared by the camera and the gun so
 ## that what you see down the crosshair is what the server traces.
 static func eye_of(pos: Vector3) -> Vector3:
@@ -197,6 +215,10 @@ func _physics_process(delta: float) -> void:
 		_send_input(delta)      # having no screen is not the same as not playing
 
 func _send_input(delta: float) -> void:
+	var me_id := multiplayer.get_unique_id()
+	if players.has(me_id) and players[me_id].dead_timer > 0.0:
+		pending.clear()          # nothing sent while dead is applied, so predict nothing
+		return
 	var move := Vector2(
 		Input.get_axis("fps_left", "fps_right"),
 		Input.get_axis("fps_back", "fps_forward"))
@@ -211,6 +233,12 @@ func _send_input(delta: float) -> void:
 	var p: Node3D = players[me]
 	p.yaw = yaw
 	p.pitch = pitch
+	# Your own jump is predicted, so the sound is too. Waiting for the server to
+	# confirm it would put a round trip between leaving the floor and hearing
+	# it, and you would notice -- the shot can wait for the server because
+	# nothing visible happens until it answers, but this cannot.
+	if is_jump_start(p.grounded, jump) and _can_render():
+		_play_flat(pick_sfx("jump"), -8.0)
 	_step(p, move, yaw, jump, delta)
 	p.target_pos = p.pos
 	pending.append({"tick": input_tick, "move": move, "yaw": yaw,
@@ -220,6 +248,14 @@ func _server_simulate(delta: float) -> void:
 	for id in players:
 		var p: Node3D = players[id]
 		p.cooldown = maxf(0.0, p.cooldown - delta)
+		if p.dead_timer > 0.0:
+			# A corpse neither moves nor shoots, and anything it sent while
+			# waiting is discarded rather than applied on the way back.
+			p.dead_timer = maxf(0.0, p.dead_timer - delta)
+			p.input_queue.clear()
+			if p.dead_timer <= 0.0:
+				_server_respawn(id)
+			continue
 		var budget := 2 if p.input_queue.size() > INPUT_BUFFER_MAX else 1
 		var consumed := 0
 		while consumed < budget and not p.input_queue.is_empty():
@@ -228,6 +264,8 @@ func _server_simulate(delta: float) -> void:
 			p.yaw = float(inp["yaw"])
 			p.pitch = float(inp["pitch"])
 			p.last_tick = int(inp["tick"])
+			if is_jump_start(p.grounded, bool(inp["jump"])):
+				_tell_members("jumped", [id, p.pos])
 			_step(p, p.move, p.yaw, bool(inp["jump"]), delta)
 			if bool(inp["fire"]):
 				_server_fire(id)
@@ -292,8 +330,8 @@ func _server_fire(shooter: int) -> void:
 	var best := minf(wall, SHOT_RANGE)
 	var victim := 0
 	for id in players:
-		if id == shooter:
-			continue
+		if id == shooter or players[id].dead_timer > 0.0:
+			continue                 # you cannot shoot someone who is waiting to come back
 		var d := hit_distance(players[id].pos, from, dir)
 		if d < best:
 			best = d
@@ -303,11 +341,24 @@ func _server_fire(shooter: int) -> void:
 		return
 	s.score += 1
 	var v: Node3D = players[victim]
-	v.pos = _spawn_point()
+	v.dead_timer = RESPAWN_DELAY
 	v.vel_y = 0.0
-	v.grounded = true
-	v.net_pos = v.pos
-	_tell_members("fragged", [shooter, victim, s.score])
+	v.input_queue.clear()
+	_tell_members("fragged", [shooter, victim, s.score, v.pos])
+
+## Back on your feet, somewhere else. The position replicates like any other,
+## but `move` has to be cleared or the body sprints off in whatever direction
+## it was last told to run.
+func _server_respawn(id: int) -> void:
+	var p: Node3D = players[id]
+	p.pos = _spawn_point()
+	p.vel_y = 0.0
+	p.grounded = true
+	p.move = Vector2.ZERO
+	p.cooldown = 0.0
+	p.net_pos = p.pos
+	p.net_vel_y = 0.0
+	p.net_grounded = true
 
 ## A shot everyone can see: a tracer that fades, drawn from the muzzle to
 ## wherever the ray stopped.
@@ -316,17 +367,39 @@ func shot_fired(from: Vector3, to: Vector3, victim: int) -> void:
 	if not _can_render() or not is_local():
 		return
 	_draw_tracer(from, to, victim != 0)
+	# Positional, so you can tell which way a shot came from -- which is most
+	# of what hearing one is for.
+	_play_at(pick_sfx("shoot"), from, 0.0)
+
+## Someone else left the floor. The owner already played their own on the
+## prediction, so this would be a double for them.
+@rpc("authority", "call_local", "reliable")
+func jumped(who: int, where: Vector3) -> void:
+	if not _can_render() or not is_local():
+		return
+	if who == multiplayer.get_unique_id():
+		return
+	_play_at(pick_sfx("jump"), where, -8.0)
 
 @rpc("authority", "call_local", "reliable")
-func fragged(shooter: int, victim: int, new_score: int) -> void:
+func fragged(shooter: int, victim: int, new_score: int, where: Vector3) -> void:
 	if players.has(shooter):
 		players[shooter].score = new_score
+	if players.has(victim):
+		players[victim].dead_timer = RESPAWN_DELAY
 	var me := multiplayer.get_unique_id()
 	if shooter == me:
 		say("Fragged %s" % game.label_for(victim))
 	elif victim == me:
 		say("%s fragged you" % game.label_for(shooter))
 		pending.clear()              # predictions from before the respawn are void
+	if _can_render() and is_local():
+		# Your own death is not a sound coming from somewhere: it happened to
+		# you, so it plays flat rather than positioned.
+		if victim == me:
+			_play_flat(pick_sfx("die"), 2.0)
+		else:
+			_play_at(pick_sfx("die"), where, -3.0)
 	_refresh()
 
 ## RPCs here go to lobby members only. A peer in another lobby has no World
@@ -425,15 +498,30 @@ func _build_view() -> void:
 	crosshair.visible = true
 	_capture_mouse(true)
 
+var _was_dead := false
+
 func _process(_delta: float) -> void:
 	if camera == null or not is_local():
 		return
+	if not multiplayer.has_multiplayer_peer():
+		return                       # disconnected: there is no "me" to follow
 	var me := multiplayer.get_unique_id()
 	if not players.has(me):
 		return
 	var p: Node3D = players[me]
+	# The camera stays where you fell, so you watch the room rather than a
+	# black screen -- but the crosshair goes, because you cannot shoot.
 	camera.position = eye_of(p.pos)
 	camera.rotation = Vector3(pitch, yaw, 0.0)
+
+	var dead: bool = p.dead_timer > 0.0
+	if dead:
+		set_status_line("Respawning in %.1f" % p.dead_timer)
+	elif _was_dead:
+		set_status_line(CONTROLS)
+	if dead != _was_dead:
+		crosshair.visible = not dead
+		_was_dead = dead
 
 func _input(event: InputEvent) -> void:
 	if camera == null or not is_local():
@@ -460,6 +548,79 @@ func _capture_mouse(on: bool) -> void:
 func _exit_tree() -> void:
 	if _mouse_held:
 		_capture_mouse(false)
+
+## Cached statically, because the folder really is global: one set of clips
+## however many lobbies are running, and a lobby cannot change what is on disk.
+static var _sfx_cache: Dictionary = {}
+
+## Every clip whose name starts with the action -- `shoot1.mp3`, `shoot2.mp3`,
+## and so on.
+static func clips_for(action: String) -> Array:
+	if not _sfx_cache.has(action):
+		_sfx_cache[action] = _scan_clips(action)
+	return _sfx_cache[action]
+
+static func _scan_clips(action: String) -> Array:
+	var out: Array = []
+	var dir := DirAccess.open(SFX_DIR)
+	if dir == null:
+		return out
+	var seen := {}
+	var names := dir.get_files()
+	names.sort()                     # a stable order, so two runs list the same
+	for entry in names:
+		# Running from source lists both `shoot1.mp3` and `shoot1.mp3.import`.
+		var file := entry.trim_suffix(".import")
+		if seen.has(file) or not file.begins_with(action):
+			continue
+		if not (file.ends_with(".mp3") or file.ends_with(".wav") or file.ends_with(".ogg")):
+			continue
+		seen[file] = true
+		var stream: Resource = load("%s/%s" % [SFX_DIR, file])
+		if stream is AudioStream:
+			out.append(stream)
+	return out
+
+## One of them, at random.
+##
+## Chosen locally, at the moment of playing, rather than picked by the server
+## and sent along: which variation you happen to hear is texture, not state.
+## It could not be shared anyway -- your own jump plays off the prediction,
+## before the server has heard about it.
+##
+## Null when the folder holds nothing for this action, which comes out as
+## silence rather than a crash.
+static func pick_sfx(action: String) -> AudioStream:
+	var clips := clips_for(action)
+	if clips.is_empty():
+		return null
+	return clips[randi() % clips.size()]
+
+## A one-shot sound somewhere in the world. The node frees itself when the
+## stream ends, so nothing has to keep a list of them.
+func _play_at(stream: AudioStream, at: Vector3, db: float) -> void:
+	if stream == null:
+		return
+	var a := AudioStreamPlayer3D.new()
+	a.stream = stream
+	a.position = at
+	a.volume_db = db
+	a.unit_size = 14.0               # audible across the room, not the whole map
+	a.max_distance = Arena.SIZE * 1.5
+	space.add_child(a)
+	a.finished.connect(a.queue_free)
+	a.play()
+
+## A sound that happened *to you* rather than somewhere near you.
+func _play_flat(stream: AudioStream, db: float) -> void:
+	if stream == null:
+		return
+	var a := AudioStreamPlayer.new()
+	a.stream = stream
+	a.volume_db = db
+	add_child(a)
+	a.finished.connect(a.queue_free)
+	a.play()
 
 func _draw_tracer(from: Vector3, to: Vector3, hit: bool) -> void:
 	var mesh := ImmediateMesh.new()

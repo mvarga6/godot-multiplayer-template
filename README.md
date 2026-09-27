@@ -258,6 +258,37 @@ special case for either.
 Shooting is a ray from the eye, on the server, and the first thing it meets wins — a pillar
 nearer than a body means the body is not hit. That single comparison is the cover mechanic.
 
+A frag does not teleport the victim straight back. `dead_timer` replicates like the score,
+and while it is running the body neither moves nor shoots nor can be shot — **and its owner
+stops predicting**, because the server is discarding what it sends. Skip that and the client
+replays those inputs during reconciliation and walks a corpse around. The camera stays where
+you fell, so you watch the room rather than a black screen, and the crosshair goes because
+there is nothing to aim.
+
+Sound is positional where direction matters and flat where it does not: a shot, a jump and
+someone else's death play from a point in the room (which way a shot came from is most of
+what hearing one is for), while *your* death and *your* jump play flat, because they did not
+happen somewhere — they happened to you.
+
+**A jump is the one cue that does not wait for the server.** It is heard on the client's own
+prediction, because the client already left the floor and a round trip between the two is
+something you can feel. A shot can wait, because nothing visible happens until the server
+answers anyway. The event then goes out to everyone *else*, who hear it positionally — the
+jumper is skipped, or they would hear it twice.
+
+Both ends decide what a jump is through one predicate, `is_jump_start(grounded, jump)`, which
+is precisely the condition `simulate` uses to apply the impulse. Sharing it is what stops a
+sound drifting away from the physics: walking off a ledge also leaves you airborne, and it
+should be silent.
+
+**Each action draws from a bank of clips.** `games/asalted/audio/` holds `shoot1.mp3`,
+`shoot2.mp3`, …, and the code discovers them by prefix rather than listing them, so dropping
+`shoot4.mp3` in beside the others adds a variation with no code change. The choice is made
+locally at the moment of playing rather than picked by the server and sent along: which
+variation you hear is texture, not state — and it could not be shared anyway, since your own
+jump plays off the prediction, before the server has heard about it. An action with no clips
+comes out as silence rather than an error.
+
 `main.gd` contains no mention of mazes, gems, weapons or rounds. The HUD takes **text**: the
 game composes its own scoreboard and status line and calls `set_score_line()` /
 `set_status_line()`, and supplies the end-of-game grid as rows of cells via
@@ -553,7 +584,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `game_world.gd` | Base class for any game: lobby identity, visibility gating, the methods `Main` calls |
 | `games/amazing/` | "A Mazing" — its World, maze, player, gems, projectiles, weapons, art and sounds |
 | `games/ashamed/` | "Ashamed" — a 2.5D side-scroller: running, depth, gravity and jumping, server-authoritative |
-| `games/asalted/` | "A Salted" — a 3D arena shooter: hand-written collision, hitscan, ellipsoid players |
+| `games/asalted/` | "A Salted" — a 3D arena shooter: hand-written collision, hitscan, ellipsoid players, positional sound |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |
@@ -561,7 +592,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
-| `tests/` | A self-contained runner and 201 tests. `make test` |
+| `tests/` | A self-contained runner and 215 tests. `make test` |
 | `notes/` | The eleven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the

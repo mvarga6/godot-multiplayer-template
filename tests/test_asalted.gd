@@ -379,6 +379,134 @@ func test_reconcile_replays_unacknowledged_input() -> void:
 	ok(float(p.pos.z) < 6.0, "the unacknowledged inputs were replayed")
 	eq(world.pending.size(), 2, "and are still pending until the server sees them")
 
+func test_only_pushing_off_the_floor_counts_as_a_jump() -> void:
+	# The sound hangs off this, so it has to mean exactly what the impulse in
+	# `simulate` means -- no noise for holding the key in mid-air, and none for
+	# walking off a ledge, which also leaves you airborne.
+	ok(AsaltedWorld.is_jump_start(true, true), "pressing jump while standing")
+	ok(not AsaltedWorld.is_jump_start(false, true), "holding it in mid-air does not")
+	ok(not AsaltedWorld.is_jump_start(true, false), "and standing still is not a jump")
+
+func test_walking_off_a_ledge_is_not_a_jump() -> void:
+	var bars := _one_box(1.0)
+	var s := {"pos": Vector3(0.0, 1.0, 0.0), "vel_y": 0.0, "grounded": true}
+	var jumps := 0
+	for _i in 60:
+		if AsaltedWorld.is_jump_start(bool(s["grounded"]), false):
+			jumps += 1
+		s = _step(bars, s, Vector2(1.0, 0.0), 0.0, false)
+	eq(jumps, 0, "you fall off it silently")
+	almost(float(s["pos"].y), 0.0, 0.01, "and you did leave the box")
+
+func test_holding_jump_does_not_retrigger_in_mid_air() -> void:
+	var s := _standing(Vector3(18.0, 0.0, 0.0))
+	var jumps := 0
+	for _i in 20:                       # held down, still airborne throughout
+		if AsaltedWorld.is_jump_start(bool(s["grounded"]), true):
+			jumps += 1
+		s = _step([], s, Vector2.ZERO, 0.0, true)
+	eq(jumps, 1, "one push off the floor, one sound")
+	ok(not bool(s["grounded"]), "and still in the air at the end of it")
+
+func test_landing_with_the_key_held_jumps_again() -> void:
+	# Not a bug to be silenced: holding jump hops you along, and each hop is a
+	# real push off the floor, so each one gets its own sound.
+	var s := _standing(Vector3(18.0, 0.0, 0.0))
+	var jumps := 0
+	for _i in 130:                      # a couple of full arcs
+		if AsaltedWorld.is_jump_start(bool(s["grounded"]), true):
+			jumps += 1
+		s = _step([], s, Vector2.ZERO, 0.0, true)
+	ok(jumps >= 2, "each landing starts a new hop (got %d)" % jumps)
+
+# --- the sound bank -------------------------------------------------------------
+
+func test_every_action_has_clips_to_choose_from() -> void:
+	for action in ["shoot", "die", "jump"]:
+		var clips := AsaltedWorld.clips_for(action)
+		ok(clips.size() >= 2, "%s has %d clips to vary between" % [action, clips.size()])
+		for c in clips:
+			ok(c is AudioStream, "every %s entry is playable" % action)
+
+func test_clips_belong_to_the_action_that_claims_them() -> void:
+	for action in ["shoot", "die", "jump"]:
+		for c in AsaltedWorld.clips_for(action):
+			var file: String = c.resource_path.get_file()
+			ok(file.begins_with(action), "%s is a %s clip" % [file, action])
+
+func test_picking_reaches_every_clip() -> void:
+	# Enough draws that missing one would mean the pick is not random at all.
+	var seen := {}
+	for _i in 80:
+		seen[AsaltedWorld.pick_sfx("shoot").resource_path] = true
+	eq(seen.size(), AsaltedWorld.clips_for("shoot").size(),
+		"every shoot clip comes up")
+
+func test_an_action_with_no_clips_is_silent_rather_than_broken() -> void:
+	ok(AsaltedWorld.pick_sfx("nosuchaction") == null, "no clips means no sound")
+	eq(AsaltedWorld.clips_for("nosuchaction").size(), 0, "and an empty list, not an error")
+
+# --- dying, and coming back ----------------------------------------------------
+
+func test_a_frag_does_not_put_you_straight_back_in_play() -> void:
+	var shooter := _fake_player(1, Vector3(18.0, 0.0, 9.0))
+	var victim := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	var fell_at: Vector3 = victim.pos
+	world._server_fire(1)
+	eq(shooter.score, 1, "the shooter scores")
+	almost(victim.dead_timer, AsaltedWorld.RESPAWN_DELAY, 0.001, "the victim is waiting")
+	eq(victim.pos, fell_at, "and is still where they fell, not already elsewhere")
+
+func test_a_dead_player_does_not_move() -> void:
+	var p := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	p.dead_timer = 5.0
+	var fell_at: Vector3 = p.pos
+	world.submit_input_for(2, 1, Vector2(0.0, 1.0), 0.0, 0.0, false, false)
+	for _i in 10:
+		world._server_simulate(TICK)
+	eq(p.pos, fell_at, "a body waiting to respawn stays put")
+	eq(p.input_queue.size(), 0, "and what it sent while dead is discarded")
+
+func test_a_dead_player_cannot_fire() -> void:
+	var shooter := _fake_player(1, Vector3(18.0, 0.0, 9.0))
+	var victim := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	shooter.dead_timer = 2.0
+	world.submit_input_for(1, 1, Vector2.ZERO, 0.0, 0.0, false, true)
+	for _i in 5:
+		world._server_simulate(TICK)
+	eq(shooter.score, 0, "the trigger does nothing while you are waiting")
+	almost(victim.dead_timer, 0.0, 0.001, "and nobody was hit by it")
+
+func test_you_cannot_shoot_someone_waiting_to_respawn() -> void:
+	var shooter := _fake_player(1, Vector3(18.0, 0.0, 9.0))
+	var victim := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	victim.dead_timer = 2.0
+	world._server_fire(1)
+	eq(shooter.score, 0, "no second score for shooting a body that is already down")
+
+func test_you_come_back_somewhere_else_when_the_timer_runs_out() -> void:
+	var p := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	p.move = Vector2(0.0, 1.0)         # they were running when they died
+	p.dead_timer = 0.2
+	var fell_at: Vector3 = p.pos
+	for _i in 20:
+		world._server_simulate(TICK)
+	almost(p.dead_timer, 0.0, 0.001, "the timer ran out")
+	ok(p.pos != fell_at, "and they came back somewhere else")
+	ok(bool(p.grounded), "standing on something")
+	eq(p.move, Vector2.ZERO, "and not still sprinting in the direction they died in")
+	almost(Arena.support_top(world.arena.barriers, p.pos.x, p.pos.z,
+		AsaltedWorld.PLAYER_RADIUS), 0.0, 0.001, "nor stuck inside a pillar")
+
+func test_the_respawn_delay_is_actually_a_delay() -> void:
+	var p := _fake_player(2, Vector3(18.0, 0.0, -9.0))
+	p.dead_timer = AsaltedWorld.RESPAWN_DELAY
+	var fell_at: Vector3 = p.pos
+	for _i in 30:                      # half a second in
+		world._server_simulate(TICK)
+	ok(p.dead_timer > 0.0, "still waiting half a second later")
+	eq(p.pos, fell_at, "and still on the floor where they fell")
+
 ## A player node the World will accept, without going through the spawner.
 func _fake_player(id: int, at: Vector3) -> Node3D:
 	var p: Node3D = (load("res://games/asalted/player.tscn") as PackedScene).instantiate()

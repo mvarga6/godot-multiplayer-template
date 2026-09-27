@@ -21,6 +21,9 @@ properties/4/replication_mode = 1
 properties/5/path = NodePath(".:score")
 properties/5/spawn = true
 properties/5/replication_mode = 1
+properties/6/path = NodePath(".:dead_timer")
+properties/6/spawn = true
+properties/6/replication_mode = 1
 
 [node name="Player" type="Node3D"]
 script = ExtResource("1_player")

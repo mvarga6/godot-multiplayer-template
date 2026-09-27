@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://cqdf1yprlm4ju"]
 
-[ext_resource type="AudioStream" path="res://audio/background.mp3" id="3_music"]
+[ext_resource type="AudioStream" uid="uid://sl57vjn1buw5" path="res://audio/king_gizzard.mp3" id="3_music"]
 [ext_resource type="Script" path="res://main.gd" id="1_main"]
 
 [node name="Main" type="Node2D" unique_id=1686026068]

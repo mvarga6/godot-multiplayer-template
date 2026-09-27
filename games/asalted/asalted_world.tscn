@@ -38,11 +38,11 @@ offset_left = -9.0
 offset_top = -1.0
 offset_right = 9.0
 offset_bottom = 1.0
-color = Color(1, 1, 1, 0.7)
+color = Color(1, 1, 1, 0.42)
 
 [node name="V" type="ColorRect" parent="Hud/Crosshair"]
 offset_left = -1.0
 offset_top = -9.0
 offset_right = 1.0
 offset_bottom = 9.0
-color = Color(1, 1, 1, 0.7)
+color = Color(1, 1, 1, 0.42)

@@ -135,6 +135,78 @@ Yaw is sent with the input rather than derived on the server, for the same reaso
 are predicted: the client turned the instant the mouse moved and predicted with the new
 heading. If the server used a heading of its own the two would disagree on every shot.
 
+## Dying takes a moment
+
+A frag sets a `dead_timer` rather than moving the victim. It replicates like the score, and
+while it runs the body does not move, does not shoot, and cannot be shot again.
+
+The part that is easy to miss is on the *client*: the owner has to stop predicting too.
+
+```gdscript
+if players.has(me_id) and players[me_id].dead_timer > 0.0:
+    pending.clear()          # nothing sent while dead is applied, so predict nothing
+    return
+```
+
+Without that, the client keeps predicting movement the server is throwing away, and every
+reconciliation replays those inputs over the top of the death — so the corpse walks. Any
+state the server stops simulating has to be state the client stops predicting, or the two
+quietly disagree about a body neither of them is moving on purpose.
+
+Respawning also clears `move`. The server keeps running your last direction when input is
+starved, so a body that died sprinting comes back sprinting into a wall.
+
+## Which sounds can wait for the server, and which cannot
+
+Three cues: a shot, a death, a jump. They are not wired the same way, and the difference is
+the same client-prediction question the whole project keeps running into.
+
+A shot is fired *on the server* — the client predicts movement, never firing — so nothing
+visible happens until the server answers. The sound can ride along with that answer and
+nobody notices.
+
+A jump is different: the client predicted it, so it has already left the floor. Putting a
+round trip between leaving the floor and hearing it is something you feel. So the jumper
+plays it locally, off the prediction, and the server's event goes to everyone *else*:
+
+```gdscript
+func jumped(who: int, where: Vector3) -> void:
+    if who == multiplayer.get_unique_id():
+        return                  # they played it on the prediction already
+    _play_at(JUMP_SFX, where, -8.0)
+```
+
+The rule that falls out: **a cue for something the client predicts should be predicted too;
+a cue for something only the server decides can wait for the server.** A mispredicted jump
+plays a sound for a jump that did not happen, which is the same trade prediction always
+makes and is worth it here.
+
+Both ends ask one predicate what a jump is:
+
+```gdscript
+static func is_jump_start(grounded: bool, jump: bool) -> bool:
+    return jump and grounded
+```
+
+That is exactly the condition `simulate` uses to apply the impulse, and sharing it is what
+keeps the sound from drifting away from the physics. Walking off a ledge also leaves you
+airborne and must stay silent; holding the key in mid-air must not retrigger. Both are
+tested, and so is the third case, which looks like a bug and is not: land with the key still
+held and you hop again, each hop a real push off the floor with its own sound.
+
+Each action draws from a bank rather than a single file. The clips are found by prefix —
+everything called `shoot*` is a shot — so adding a variation means dropping a file in the
+folder, not editing a list. The pick happens locally when the sound plays, and deliberately
+is not sent from the server: which variation you heard is texture rather than state, and it
+could not be shared even if it were worth sharing, because your own jump plays off the
+prediction before the server knows about it. Two players hearing different variations of the
+same shot is a difference nobody can perceive; a jump you hear a round trip late is one
+everybody can.
+
+Positional or flat follows the same instinct as the death cue. Someone else's jump is
+information about where they are, so it plays from a point in the room. Your own did not
+happen somewhere — it happened to you.
+
 ## One thing visibility gating does not cover
 
 Lobby isolation works by hiding each World's synchronizer from peers in other lobbies. That
@@ -154,12 +226,14 @@ func _tell_members(method: StringName, args: Array) -> void:
 
 ## Verifying it
 
-31 unit tests cover the pure parts: that a seed reproduces a map exactly, that barriers
+45 unit tests cover the pure parts: that a seed reproduces a map exactly, that barriers
 leave a walkable gap and keep out of the spawn ring, that you cannot walk through cover or
 leave the room, that you slide along a face, that a low box can be jumped onto and a tall
 one cannot, that walking into either kind never lifts you, that ray-box and ray-cylinder
-hit what is in front and ignore what is behind, and that reconciliation restores position,
-velocity and footing.
+hit what is in front and ignore what is behind, that reconciliation restores position,
+velocity and footing, and that a frag starts a timer rather than a teleport -- a dead body
+stays put, ignores what it sends, cannot be shot again, and comes back somewhere clear with
+its heading reset.
 
 Then five processes, because none of that proves the wire works: a server, two players in
 the shooter and two more in an A Mazing lobby at the same time. The client's predicted stop

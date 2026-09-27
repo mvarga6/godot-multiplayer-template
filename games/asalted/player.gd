@@ -38,6 +38,15 @@ var net_yaw: float = 0.0
 ## replicates directly with no shadow copy.
 var score: int = 0
 
+## Seconds until this body comes back; 0 means alive. Server-owned and
+## replicated, like the score. Clients count it down locally between syncs so
+## the number on screen moves smoothly, and the server's value wins whenever
+## one arrives.
+var dead_timer: float = 0.0
+
+func is_dead() -> bool:
+	return dead_timer > 0.0
+
 # --- client-only state ----------------------------------------------------------
 var target_pos: Vector3 = Vector3.ZERO
 var target_yaw: float = 0.0
@@ -47,6 +56,7 @@ var _icon := "?"
 var _display := ""
 var _body: Node3D = null
 var _tag: Label3D = null
+var _own_view := false          # true on the peer looking through this body's eyes
 
 func setup(id: int) -> void:
 	peer_id = id
@@ -60,21 +70,28 @@ func set_label(glyph: String, display: String) -> void:
 
 ## First person: you do not see yourself from the inside.
 func hide_body() -> void:
+	_own_view = true
+	_show_body(false)
+
+func _show_body(on: bool) -> void:
 	if _body != null:
-		_body.visible = false
-	if _tag != null:
-		_tag.visible = false
+		_body.visible = on
 
 func _ready() -> void:
 	_build_body()
 
 func _process(delta: float) -> void:
+	if not multiplayer.is_server() and dead_timer > 0.0:
+		# Smooth between syncs, purely for the number on screen. The server
+		# decrements the real one in its own tick.
+		dead_timer = maxf(0.0, dead_timer - delta)
 	if not is_local_authority:
 		var k := 1.0 - pow(0.001, delta)
 		pos = pos.lerp(target_pos, k)
 		yaw = lerp_angle(yaw, target_yaw, k)
 	position = pos
 	rotation.y = yaw
+	_show_body(not _own_view and not is_dead())
 
 # --- the body ---------------------------------------------------------------------
 #
