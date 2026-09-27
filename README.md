@@ -220,6 +220,44 @@ One consequence worth knowing: when no input arrives in time, the server keeps r
 the same direction but **never repeats the jump**. A jump is an edge, not a state, and a
 repeated edge would be a free second jump on every starved tick.
 
+`games/asalted/` is the third game and the first that is not flat: a 3D arena shooter. It
+cost the shell **one method**.
+
+The World is still a `Node2D`, because `GameWorld` says so, and the 3D hangs off it in a
+`Node3D` child. Godot renders 3D and the canvas as two passes over the same viewport, so a
+`Node3D` under a `Node2D` simply becomes a root in the 3D pass, with the CanvasLayer HUD
+drawn over both. No base class had to change and no existing game was touched.
+
+What did have to change is that the shell owns a `Camera2D` and had always assumed it was
+the view. `uses_shell_camera()` lets a game decline it and drive its own `Camera3D`; the
+shell then stops clamping and moving a camera nothing is looking through. That is the third
+leak of its kind, after `world_bounds()` and `camera_focus()`, and they all have the same
+shape: the first game's assumptions written down as if they were the shell's.
+
+**There is not a single PhysicsBody in it**, and that is forced rather than chosen.
+Reconciliation replays `simulate()` over buffered inputs — four ticks re-run inside one
+frame — and a `PhysicsBody` only moves when the physics step runs. You cannot replay the
+physics server. So collision is arithmetic over a plain `Array` of
+`{kind, pos, half, radius, top}`: push a circle out of a box or a circle, find what is
+underfoot, clamp to the room. Only the map's *seed* crosses the wire, so every peer's replay
+agrees.
+
+The rule that governs landing is worth stating, because the obvious version is wrong:
+
+```gdscript
+## What the body actually lands on: the floor, or the top of something it was
+## already above.
+static func support_under(barriers, x, z, radius, feet_from: float) -> float
+```
+
+"The top of whatever you overlap" turns every piece of cover into a lift — walk into the
+side of a box and you are standing on its roof. You land on what you *fall onto*; you are
+not lifted by what you walk into. A low box is then a perch and a tall one is cover, with no
+special case for either.
+
+Shooting is a ray from the eye, on the server, and the first thing it meets wins — a pillar
+nearer than a body means the body is not hit. That single comparison is the cover mechanic.
+
 `main.gd` contains no mention of mazes, gems, weapons or rounds. The HUD takes **text**: the
 game composes its own scoreboard and status line and calls `set_score_line()` /
 `set_status_line()`, and supplies the end-of-game grid as rows of cells via
@@ -239,6 +277,11 @@ into is a lookup table wearing a registry's name.
 `Main` owns the socket, the handshake, the identities and the screen. Each game is a `World`
 node under `Worlds`. The server holds every World and simulates all of them; a client holds
 exactly one.
+
+**Visibility gates nodes, not RPCs.** Hiding a World's synchronizer hides its spawns,
+despawns and state from peers in other lobbies — but a broadcast `rpc()` still goes to
+everyone, and a peer in another lobby has no node at that path to receive it. A game that
+sends events (A Salted's shots and frags) addresses its members explicitly with `rpc_id`.
 
 **Separation is done with visibility.** `MultiplayerSpawner` has no visibility API, but
 `MultiplayerSynchronizer` does, and a spawn is only delivered to peers that can see the
@@ -510,6 +553,7 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `game_world.gd` | Base class for any game: lobby identity, visibility gating, the methods `Main` calls |
 | `games/amazing/` | "A Mazing" — its World, maze, player, gems, projectiles, weapons, art and sounds |
 | `games/ashamed/` | "Ashamed" — a 2.5D side-scroller: running, depth, gravity and jumping, server-authoritative |
+| `games/asalted/` | "A Salted" — a 3D arena shooter: hand-written collision, hitscan, ellipsoid players |
 | `player.gd` / `player.tscn` | The emoji glyph and name tag, interpolation, and the server's per-peer input queue |
 | `weapon.gd` | The weapon spec table: speed, cost, lifespan, reflection, per-kind traits |
 | `projectile.gd` / `projectile.tscn` | A shot in flight, and the pure `step()` every peer integrates |
@@ -517,8 +561,8 @@ which `make tunnel-attach PLAYIT=playit` works without a password prompt.
 | `collectible.gd` | One pickup: its kind, sound, lifespan countdown, and how it draws itself |
 | `audio/` | Looping background track, plus one synthesised cue per pickup kind |
 | `Makefile` | `server`, `tunnel`, `tunnel-stop`, `tunnel-status`, `tunnel-attach` |
-| `tests/` | A self-contained runner and 162 tests. `make test` |
-| `notes/` | The ten-stage write-up this was built from |
+| `tests/` | A self-contained runner and 201 tests. `make test` |
+| `notes/` | The eleven-stage write-up this was built from |
 
 Player nodes are named after their peer id and live under `Main/Players/<peer_id>`, so the
 same node sits at the same path on every peer. That is what makes RPC addressing work.

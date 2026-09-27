@@ -56,9 +56,9 @@ func server_admit(_peer: int) -> void:
 func server_evict(_peer: int) -> void:
 	push_error("%s does not implement server_evict()" % get_script().resource_path)
 
-## How big this game's playfield is. The shell clamps the camera to it, and has
+## How big this game's playfield is. The shell clamps its camera to it, and has
 ## no other way of knowing -- a maze and a lobby of idle avatars are not the
-## same size.
+## same size. Meaningless for a game that renders its own view.
 func world_bounds() -> Rect2:
 	return Rect2(Vector2.ZERO, Vector2(1152, 648))
 
@@ -66,6 +66,16 @@ func world_bounds() -> Rect2:
 ## follow the body; one with a perspective floor may want to hold an axis still.
 func camera_focus(player: Node) -> Vector2:
 	return player.position
+
+## Whether the shell's Camera2D is this game's view.
+##
+## True for a 2D game: the shell owns one camera and lends it out, clamping it
+## to `world_bounds()` and pointing it at `camera_focus()`. A 3D game returns
+## false, renders through a Camera3D of its own, and the shell stops touching
+## the view entirely -- the HUD sits on CanvasLayers, so it draws on top either
+## way.
+func uses_shell_camera() -> bool:
+	return true
 
 # --- lobby isolation ----------------------------------------------------------
 

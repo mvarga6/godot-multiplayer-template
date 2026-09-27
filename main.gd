@@ -148,6 +148,8 @@ func _setup_camera() -> void:
 ## The playfield is the game's business, not the shell's, so the camera bounds
 ## come from whichever world you are actually in.
 func _apply_camera_bounds(world: GameWorld) -> void:
+	if world != null and not world.uses_shell_camera():
+		return                      # the game renders its own view
 	var bounds := Rect2(Vector2.ZERO, Vector2(1152, 648)) if world == null \
 		else world.world_bounds()
 	camera.limit_left = int(bounds.position.x)
@@ -649,7 +651,7 @@ func _process(_delta: float) -> void:
 	if is_dedicated:
 		return
 	var w := local_world()
-	if w != null:
+	if w != null and w.uses_shell_camera():
 		var me := multiplayer.get_unique_id()
 		if w.players.has(me):
 			camera.position = w.camera_focus(w.players[me])

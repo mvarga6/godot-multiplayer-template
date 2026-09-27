@@ -13,8 +13,9 @@ extends RefCounted
 ##     server_evict(peer)      take them out
 ##     world_bounds()          how big the playfield is, for the camera
 ##
-## `games/ashamed/` is the newest one, still a skeleton: a player, a container
-## and a spawner, and nothing else yet.
+## `games/asalted/` is the newest one, and the first that is not flat: a 3D
+## World whose scene root is still the `Node2D` the base class asks for, with
+## the 3D hanging off it in a `Node3D` child.
 ##
 ## Everything else -- lobby identity, visibility gating, the screen helpers --
 ## comes from the base class. Nothing in `main.gd` knows what a maze is, and
@@ -33,8 +34,13 @@ static var TYPES := {
 	},
 	"ashamed": {
 		"name": "Ashamed",
-		"blurb": "A 2D side-scroller. Skeleton for now: players appear and leave.",
+		"blurb": "A 2.5D side-scroller: run, jump, and walk into the screen.",
 		"scene": "res://games/ashamed/ashamed_world.tscn",
+	},
+	"asalted": {
+		"name": "A Salted",
+		"blurb": "A 3D arena shooter. Hitscan, cover, and no respawn timer.",
+		"scene": "res://games/asalted/asalted_world.tscn",
 	},
 }
 
