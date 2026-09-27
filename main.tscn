@@ -13,7 +13,7 @@ spawn_path = NodePath("../Worlds")
 
 [node name="Music" type="AudioStreamPlayer" parent="."]
 stream = ExtResource("3_music")
-volume_db = -14.0
+volume_db = -20.0
 
 [node name="Camera2D" type="Camera2D" parent="."]
 
